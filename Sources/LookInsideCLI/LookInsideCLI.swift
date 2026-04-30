@@ -21,7 +21,6 @@ struct LookInside: ParsableCommand {
             Export.self,
             Attrs.self,
             Ivars.self,
-            TextSnapshot.self,
             SwiftUIDebug.self,
         ],
         defaultSubcommand: List.self
@@ -233,44 +232,10 @@ private struct Ivars: ParsableCommand {
     }
 }
 
-private struct TextSnapshot: ParsableCommand {
-    static let configuration = CommandConfiguration(
-        commandName: "text-snapshot",
-        abstract: "Capture the SwiftUI text drawn by a CALayer (font / size / color / text content).",
-        discussion: """
-        SwiftUI renders Text into private _CGDrawingLayer instances whose
-        `content` is an opaque drawing closure, so the regular `attrs` and
-        `ivars` subcommands can't see the resolved font, point size, fill
-        colour or glyphs.
-
-        text-snapshot installs CoreText / CoreGraphics interposers via
-        fishhook the first time it runs, then drives the target layer's
-        drawInContext: against an off-screen bitmap context. The hooks
-        record every CTFontDrawGlyphs / CGContextSetFillColor* call made
-        during that one draw pass and return them as JSON, including a
-        best-effort glyph→character reversal that recovers the visible
-        text.
-
-        The target OID must resolve to a CALayer (typically a
-        SwiftUI._CGDrawingLayer or its subclass).
-        """
-    )
-
-    @OptionGroup var options: SharedTargetOptions
-
-    @Option(help: "Layer OID from `lookinside hierarchy`. Must be a CALayer.")
-    var oid: UInt
-
-    mutating func run() throws {
-        let json = try CLIClient().textSnapshotJSON(target: options.target, oid: oid)
-        StandardPrinter.printLine(json)
-    }
-}
-
 private struct SwiftUIDebug: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "swiftui-debug",
-        abstract: "Dump SwiftUI viewDebugData (font / colour / text) for an NSHostingView.",
+        abstract: "Dump SwiftUI viewDebugData (font / colour / text / frame) for an NSHostingView.",
         discussion: """
         Calls -[NSHostingView makeViewDebugData] and
         -[NSHostingView _accessibilitySwiftUIDebugData] on the OID's resolved
@@ -284,6 +249,20 @@ private struct SwiftUIDebug: ParsableCommand {
         The target OID must resolve to an NSHostingView (or subclass). Use
         `lookinside hierarchy` to find one — they show up in the tree as
         `_TtGC7SwiftUI13NSHostingView...` classes with subrole AXHostingView.
+
+        Output modes:
+          (default)   the full Apple JSON payload (~50MB), with no filtering.
+                      Use this when you need fields the parsed views don't
+                      surface (image asset names, NamedColor tokens, view
+                      modifier chains, etc.).
+          --summary   a compact human-readable table extracted from the
+                      display-list (frame / fill / clip radius / opacity /
+                      font / size / color / alignment / text content).
+          --items     the same parse as --summary but as a structured JSON
+                      array, with each item carrying both the typed columns
+                      and an `extras` dict preserving every keyword token
+                      we didn't project (version, content-seed, raw clip
+                      path, etc.). Use this when scripting consumers.
         """
     )
 
@@ -296,10 +275,19 @@ private struct SwiftUIDebug: ParsableCommand {
           help: "Print only a flat summary table (text / font / size / color / frame) instead of the full JSON.")
     var summary: Bool = false
 
+    @Flag(name: .long,
+          help: "Print the parsed display-list items as a JSON array. Mutually exclusive with --summary.")
+    var items: Bool = false
+
     mutating func run() throws {
         let json = try CLIClient().swiftUIDebugJSON(target: options.target, oid: oid)
+        if summary && items {
+            throw ValidationError("--summary and --items are mutually exclusive.")
+        }
         if summary {
             StandardPrinter.printLine(SwiftUIDebugSummary.render(fromJSON: json))
+        } else if items {
+            StandardPrinter.printLine(SwiftUIDebugSummary.renderItemsJSON(fromJSON: json))
         } else {
             StandardPrinter.printLine(json)
         }
@@ -344,22 +332,27 @@ private enum SwiftUIDebugSummary {
         var fontSize: Double?
         var alignment: String?
         var lineSpacing: Double?
+        /// Forms inside the item that we recognised the kind of but didn't
+        /// otherwise project into a typed field — version, content-seed,
+        /// raw clip path, raw style, etc. Round-tripped to JSON in
+        /// `--items` mode so consumers can inspect any token we don't
+        /// hand-pick into the typed columns.
+        var extras: [String: String] = [:]
     }
 
     // MARK: - Public entry
 
-    static func render(fromJSON jsonString: String) -> String {
+    /// Run the full pipeline (collect leafs → parse attributed strings → walk
+    /// display-list) and return the items array. Used by both `--summary`
+    /// (which formats as a table) and `--items` (which serialises as JSON).
+    static func extractItems(fromJSON jsonString: String) -> [Item]? {
         guard let data = jsonString.data(using: .utf8),
               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return "(error: could not parse swiftui-debug JSON)"
+            return nil
         }
-
-        // 1. Collect every leaf string and find the display-list and
-        //    attributed-text descriptions.
         var leafStrings: [String] = []
         collectLeafStrings(parsed["viewDebugData"], into: &leafStrings)
 
-        // attributed-text descriptions index text content -> {font, size, alignment, lineSpacing, color}
         var attrIndex: [String: AttrInfo] = [:]
         for s in leafStrings where s.contains("NSFont") {
             if let info = parseAttributedDescription(s) {
@@ -367,26 +360,63 @@ private enum SwiftUIDebugSummary {
             }
         }
 
-        // 2. Walk every display-list-item s-expression and harvest items.
         var items: [Item] = []
         for s in leafStrings where s.contains("display-list-item") {
             items.append(contentsOf: walkDisplayList(s, attrIndex: attrIndex))
         }
 
-        // De-dup: SwiftUI sometimes lists the same item twice (different render passes).
-        // Key by (identity, abs frame).
         var seen = Set<String>()
         items = items.filter {
             let k = "\($0.identity)|\($0.x)|\($0.y)|\($0.w)|\($0.h)|\($0.kind)|\($0.text ?? "")"
             if seen.contains(k) { return false }
             seen.insert(k); return true
         }
+        return items
+    }
 
+    static func render(fromJSON jsonString: String) -> String {
+        guard let items = extractItems(fromJSON: jsonString) else {
+            return "(error: could not parse swiftui-debug JSON)"
+        }
         if items.isEmpty {
             return "(no display-list items decoded — try the full JSON output without --summary)"
         }
-
         return formatTable(items)
+    }
+
+    /// JSON-serialised items. Each item is a dictionary with all typed
+    /// fields plus an `extras` sub-dict for tokens that the formatted table
+    /// doesn't surface (version / content-seed / raw clip-path / raw style /
+    /// platform-group flag, etc.). Suitable as a stable wire format for
+    /// downstream tooling that needs more than `--summary` exposes.
+    static func renderItemsJSON(fromJSON jsonString: String) -> String {
+        guard let items = extractItems(fromJSON: jsonString) else {
+            return "[]"
+        }
+        let array: [[String: Any]] = items.map { it in
+            var d: [String: Any] = [
+                "identity": it.identity,
+                "kind": it.kind,
+                "x": it.x, "y": it.y, "w": it.w, "h": it.h,
+                "opacity": it.opacity,
+            ]
+            if let r = it.cornerRadius { d["cornerRadius"] = r }
+            if let c = it.fillColor    { d["fillColor"] = c }
+            if let s = it.imageSize    { d["imageSize"] = ["w": s.0, "h": s.1] }
+            if let t = it.text         { d["text"] = t }
+            if let f = it.font         { d["font"] = f }
+            if let s = it.fontSize     { d["fontSize"] = s }
+            if let a = it.alignment    { d["alignment"] = a }
+            if let l = it.lineSpacing  { d["lineSpacing"] = l }
+            if !it.extras.isEmpty      { d["extras"] = it.extras }
+            return d
+        }
+        let opts: JSONSerialization.WritingOptions = [.prettyPrinted, .sortedKeys, .fragmentsAllowed]
+        guard let data = try? JSONSerialization.data(withJSONObject: array, options: opts),
+              let str = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+        return str
     }
 
     // MARK: - Table render
@@ -648,8 +678,11 @@ private enum SwiftUIDebugSummary {
         var identity = ""
         var localFrame: (Double, Double, Double, Double) = (0, 0, 0, 0)
         var bodyForms: [Sexpr] = []
-        var nodeOpacity: Double = 1.0
-        var nodeCornerRadius: Double? = nil
+        let nodeOpacity: Double = 1.0
+        let nodeCornerRadius: Double? = nil
+        // Captures keyword pairs on the item itself (e.g. #:version 1801,
+        // #:required true). Surfaces in `extras` for `--items` consumers.
+        var itemKeywords: [String: String] = [:]
 
         // Walk each form to extract identity + frame and stash the rest.
         var i = 0
@@ -662,7 +695,11 @@ private enum SwiftUIDebugSummary {
                     continue
                 }
                 if a.hasPrefix("#:") {
-                    // Skip key/value attribute pair (e.g. #:version 12)
+                    // Capture keyword/value pair (e.g. #:version 1801, #:required true)
+                    if i + 1 < children.count, case .atom(let v) = children[i+1] {
+                        let key = String(a.dropFirst(2))
+                        itemKeywords[key] = v
+                    }
                     i += 2
                     continue
                 }
@@ -748,13 +785,15 @@ private enum SwiftUIDebugSummary {
                     if color.hasPrefix("#") {
                         color = "#" + String(color.dropFirst()).uppercased()
                     }
-                    items.append(Item(
+                    var item = Item(
                         identity: identity, kind: "fill",
                         x: absX, y: absY, w: w, h: h,
                         opacity: parentOpacity * nodeOpacity,
                         cornerRadius: parentCornerRadius,
                         fillColor: color, imageSize: nil,
-                        text: nil, font: nil, fontSize: nil, alignment: nil, lineSpacing: nil))
+                        text: nil, font: nil, fontSize: nil, alignment: nil, lineSpacing: nil)
+                    item.extras = itemKeywords
+                    items.append(item)
                     didEmit = true
                 }
 
@@ -765,14 +804,16 @@ private enum SwiftUIDebugSummary {
                     text = str
                 }
                 let attr = attrIndex[text]
-                items.append(Item(
+                var item = Item(
                     identity: identity, kind: "text",
                     x: absX, y: absY, w: w, h: h,
                     opacity: parentOpacity * nodeOpacity,
                     cornerRadius: parentCornerRadius,
                     fillColor: attr?.color, imageSize: nil,
                     text: text, font: attr?.font, fontSize: attr?.fontSize,
-                    alignment: attr?.alignment, lineSpacing: attr?.lineSpacing))
+                    alignment: attr?.alignment, lineSpacing: attr?.lineSpacing)
+                item.extras = itemKeywords
+                items.append(item)
                 didEmit = true
 
             case "image":
@@ -785,42 +826,51 @@ private enum SwiftUIDebugSummary {
                         imgSize = (dw, dh)
                     }
                 }
-                items.append(Item(
+                var item = Item(
                     identity: identity, kind: "image",
                     x: absX, y: absY, w: w, h: h,
                     opacity: parentOpacity * nodeOpacity,
                     cornerRadius: parentCornerRadius,
                     fillColor: nil, imageSize: imgSize,
-                    text: nil, font: nil, fontSize: nil, alignment: nil, lineSpacing: nil))
+                    text: nil, font: nil, fontSize: nil, alignment: nil, lineSpacing: nil)
+                item.extras = itemKeywords
+                items.append(item)
                 didEmit = true
 
             case "platform-view":
-                items.append(Item(
+                var item = Item(
                     identity: identity, kind: "platform",
                     x: absX, y: absY, w: w, h: h,
                     opacity: parentOpacity * nodeOpacity,
                     cornerRadius: parentCornerRadius,
                     fillColor: nil, imageSize: nil,
-                    text: nil, font: nil, fontSize: nil, alignment: nil, lineSpacing: nil))
+                    text: nil, font: nil, fontSize: nil, alignment: nil, lineSpacing: nil)
+                item.extras = itemKeywords
+                items.append(item)
                 didEmit = true
 
             case "content-seed":
                 if kids.count >= 2, case .atom(let s) = kids[1] { contentSeed = s }
-                _ = contentSeed
 
             default:
                 break
             }
         }
 
+        if let cs = contentSeed {
+            itemKeywords["content-seed"] = cs
+        }
+
         if !didEmit && (w > 0 || h > 0) {
-            items.append(Item(
+            var item = Item(
                 identity: identity, kind: "group",
                 x: absX, y: absY, w: w, h: h,
                 opacity: parentOpacity * nodeOpacity,
                 cornerRadius: parentCornerRadius,
                 fillColor: nil, imageSize: nil,
-                text: nil, font: nil, fontSize: nil, alignment: nil, lineSpacing: nil))
+                text: nil, font: nil, fontSize: nil, alignment: nil, lineSpacing: nil)
+            item.extras = itemKeywords
+            items.append(item)
         }
     }
 
@@ -930,14 +980,6 @@ private struct CLIClient {
     func introspectJSON(target: String, oid: UInt) throws -> String {
         do {
             return try client.introspectJSON(forTargetID: target, oid: oid)
-        } catch {
-            throw error
-        }
-    }
-
-    func textSnapshotJSON(target: String, oid: UInt) throws -> String {
-        do {
-            return try client.textSnapshotJSON(forTargetID: target, oid: oid)
         } catch {
             throw error
         }

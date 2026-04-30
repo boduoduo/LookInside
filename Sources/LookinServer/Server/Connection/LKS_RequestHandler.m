@@ -18,9 +18,6 @@
 #import "NSObject+LookinServer.h"
 #import "LKS_AttrGroupsMaker.h"
 #import "LKS_IntrospectionHandler.h"
-#if TARGET_OS_OSX
-#import "LKS_TextDrawHook.h"
-#endif
 #import <objc/message.h>
 #import "LKS_InbuiltAttrModificationHandler.h"
 #import "LKS_CustomAttrModificationHandler.h"
@@ -58,7 +55,6 @@
             @(LookinRequestTypeFetchImageViewImage),
             @(LookinRequestTypeModifyRecognizerEnable),
             @(LookinRequestTypeIntrospect),
-            @(LookinRequestTypeTextSnapshot),
             @(LookinRequestTypeSwiftUIDebugData),
             @(LookinPush_CanceHierarchyDetails),
         ]];
@@ -198,86 +194,6 @@
         return;
     }
 
-    if (requestType == LookinRequestTypeTextSnapshot) {
-#if TARGET_OS_OSX
-        unsigned long oid = [(NSNumber *)object unsignedLongValue];
-        NSObject *resolvedObject = [NSObject lks_objectWithOid:oid];
-        if (![resolvedObject isKindOfClass:[CALayer class]]) {
-            [self _respondWithError:LookinErr_ObjNotFound requestType:requestType tag:tag];
-            return;
-        }
-        CALayer *layer = (CALayer *)resolvedObject;
-        CGFloat w = MAX(layer.bounds.size.width, 1);
-        CGFloat h = MAX(layer.bounds.size.height, 1);
-
-        // We render into a throw-away offscreen bitmap so the host's actual
-        // CALayer presentation isn't disturbed; the hook only records calls
-        // made into *this* context (in fact, into any context — the TLS
-        // capture flag scopes it correctly regardless).
-        CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-        CGContextRef ctx = CGBitmapContextCreate(NULL, (size_t)w, (size_t)h, 8, 0, cs,
-                                                 (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
-        CGColorSpaceRelease(cs);
-
-        NSArray<LKS_TextDrawRecord *> *records =
-            [LKS_TextDrawHook snapshotWithBlock:^{
-                if (!ctx) return;
-                // Self-probe: prove the hook is wired.
-                CTFontRef probeFont = CTFontCreateWithName(CFSTR("Helvetica"), 12, NULL);
-                if (probeFont) {
-                    UniChar probeChars[] = { 'L', 'K', 'S' };
-                    CGGlyph probeGlyphs[3] = {0};
-                    CTFontGetGlyphsForCharacters(probeFont, probeChars, probeGlyphs, 3);
-                    CGPoint probePts[3] = { {0,0}, {6,0}, {12,0} };
-                    CTFontDrawGlyphs(probeFont, probeGlyphs, probePts, 3, ctx);
-                    CFRelease(probeFont);
-                }
-
-                // SwiftUI _CGDrawingLayer caches its rasterised text in
-                // `layer.contents` and skips its draw closure on subsequent
-                // displays. Wipe contents + force a fresh display to get the
-                // closure to re-execute. This is safe because dyld will
-                // re-render the layer in the next CA commit cycle anyway.
-                id savedContents = layer.contents;
-                layer.contents = nil;
-                [layer setNeedsDisplay];
-                if ([layer respondsToSelector:@selector(displayIfNeeded)]) {
-                    [layer displayIfNeeded];
-                } else {
-                    [layer display];
-                }
-                [layer drawInContext:ctx];
-                [layer renderInContext:ctx];
-                if (layer.contents == nil) layer.contents = savedContents;
-            }];
-
-        if (ctx) CGContextRelease(ctx);
-
-        NSMutableArray *out = [NSMutableArray array];
-        for (LKS_TextDrawRecord *r in records) {
-            NSMutableDictionary *d = [NSMutableDictionary dictionary];
-            if (r.fontName)       d[@"fontName"] = r.fontName;
-            if (r.postScriptName) d[@"postScriptName"] = r.postScriptName;
-            d[@"fontSize"] = @(r.fontSize);
-            if (r.fontTraits.length) d[@"fontTraits"] = r.fontTraits;
-            if (r.text)           d[@"text"] = r.text;
-            if (r.glyphs.count)   d[@"glyphCount"] = @(r.glyphs.count);
-            if (r.fillRGBA.count) d[@"fillRGBA"] = r.fillRGBA;
-            [out addObject:d];
-        }
-        NSDictionary *response = @{
-            @"hooksInstalled": @([LKS_TextDrawHook installHooks]),
-            @"recordCount": @(out.count),
-            @"records": out,
-        };
-        [self _respondWithData:response requestType:requestType tag:tag];
-        return;
-#else
-        [self _respondWithError:LookinErr_Inner requestType:requestType tag:tag];
-        return;
-#endif
-    }
-
     if (requestType == LookinRequestTypeSwiftUIDebugData) {
 #if TARGET_OS_OSX
         unsigned long oid = [(NSNumber *)object unsignedLongValue];
@@ -292,9 +208,9 @@
 
         // SwiftUI exposes two undocumented selectors on every NSHostingView
         // subclass that the Xcode View Debugger consumes. They are stable
-        // public(-ish) ObjC entry points (no fishhook needed) and return
-        // structured JSON / NSArray that already contain font / colour /
-        // text attributes for every Text/Image in the hosted SwiftUI tree.
+        // public-ish ObjC entry points and return structured JSON / NSArray
+        // that already contain font / colour / text attributes for every
+        // Text/Image in the hosted SwiftUI tree.
         SEL makeViewDebugDataSel = @selector(makeViewDebugData);
         SEL accessibilityDebugSel = @selector(_accessibilitySwiftUIDebugData);
 

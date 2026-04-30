@@ -96,7 +96,6 @@ let package = Package(
                 .headerSearchPath("Server/Connection"),
                 .headerSearchPath("Server/Connection/RequestHandler"),
                 .headerSearchPath("Server/Others"),
-                .headerSearchPath("Server/TextHook"),
                 .headerSearchPath("../LookinCore"),
                 .headerSearchPath("../LookinCore/include"),
                 .headerSearchPath("../LookinCore/Category"),

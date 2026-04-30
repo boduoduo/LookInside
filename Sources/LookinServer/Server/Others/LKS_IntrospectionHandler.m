@@ -177,6 +177,48 @@ static NSDictionary *LKS_AccessibilityInfo(id object) {
 
     return info.count ? info : nil;
 }
+
+/// Recursively collects accessibility children up to a small depth so that
+/// SwiftUI's AXHostingView surface (where every Text/Button/Image becomes a
+/// child element rather than a child NSView) can be browsed from the CLI.
+/// The depth limit + child cap keep payloads bounded for noisy hosting views.
+static NSArray *LKS_AccessibilityChildren(id object, int depth, int maxDepth, int maxChildren) {
+    if (depth >= maxDepth) return nil;
+    if (![object respondsToSelector:@selector(accessibilityChildren)]) return nil;
+
+    NSArray *children = nil;
+    @try {
+        children = [object accessibilityChildren];
+    } @catch (__unused id _) {
+        return nil;
+    }
+    if (!children.count) return nil;
+
+    NSMutableArray *out = [NSMutableArray array];
+    for (id child in children) {
+        if (out.count >= (NSUInteger)maxChildren) break;
+        NSMutableDictionary *node = [NSMutableDictionary dictionary];
+        node[@"className"] = NSStringFromClass([child class]) ?: @"?";
+        node[@"address"] = [NSString stringWithFormat:@"%p", child];
+
+        NSDictionary *axInfo = LKS_AccessibilityInfo(child);
+        if (axInfo) [node addEntriesFromDictionary:axInfo];
+
+        if ([child respondsToSelector:@selector(accessibilityFrame)]) {
+            @try {
+                NSRect r = [child accessibilityFrame];
+                node[@"frame"] = [NSString stringWithFormat:@"{%.0f, %.0f, %.0f, %.0f}",
+                                  r.origin.x, r.origin.y, r.size.width, r.size.height];
+            } @catch (__unused id _) {}
+        }
+
+        NSArray *grand = LKS_AccessibilityChildren(child, depth + 1, maxDepth, maxChildren);
+        if (grand.count) node[@"children"] = grand;
+
+        [out addObject:node];
+    }
+    return out;
+}
 #endif
 
 /// AppKit-native font/string/color quick-look. These use only public API
@@ -262,6 +304,12 @@ static NSDictionary *LKS_AppKitQuickLook(id object) {
 #if TARGET_OS_OSX
     NSDictionary *ax = LKS_AccessibilityInfo(object);
     if (ax) result[@"accessibility"] = ax;
+
+    // Walk a couple of levels of accessibility children. SwiftUI's
+    // NSHostingView (subrole=AXHostingView) is where Text / Button / Image
+    // semantics actually live; the bridged NSViews are mostly invisible to AX.
+    NSArray *axChildren = LKS_AccessibilityChildren(object, 0, /*maxDepth=*/3, /*maxChildren=*/40);
+    if (axChildren.count) result[@"axChildren"] = axChildren;
 #endif
 
     return result;

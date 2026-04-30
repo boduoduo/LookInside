@@ -322,16 +322,31 @@ private struct SwiftUIDebug: ParsableCommand {
 /// view in practice) and emit a stable plain-text table.
 private enum SwiftUIDebugSummary {
 
-    struct TextRun {
-        var text: String
-        var width: Double?
-        var height: Double?
-        var color: String?       // from display-list "(color #RRGGBBAA)"
-        var font: String?        // from attributed-string ".SFNS-Semibold"
+    // MARK: - Output row model
+
+    /// One emitted row in the summary table. Each row corresponds to a
+    /// drawn item we extracted from the display-list. The dimensions we
+    /// can extract reliably are listed in `kind`-specific fields below;
+    /// see swiftui-attrs.md for what the table can and cannot represent.
+    struct Item {
+        var identity: String       // display-list item identity, or "" for synthetic
+        var kind: String           // group / fill / text / image / platform / clip
+        var x: Double
+        var y: Double
+        var w: Double
+        var h: Double
+        var opacity: Double        // accumulated through ancestor (effect #:opacity)
+        var cornerRadius: Double?  // extracted from enclosing clip path if it's a rounded rect
+        var fillColor: String?     // "#RRGGBBAA"
+        var imageSize: (Double, Double)?
+        var text: String?
+        var font: String?
         var fontSize: Double?
         var alignment: String?
         var lineSpacing: Double?
     }
+
+    // MARK: - Public entry
 
     static func render(fromJSON jsonString: String) -> String {
         guard let data = jsonString.data(using: .utf8),
@@ -339,81 +354,111 @@ private enum SwiftUIDebugSummary {
             return "(error: could not parse swiftui-debug JSON)"
         }
 
-        // Collect every leaf string from the entire payload first.
+        // 1. Collect every leaf string and find the display-list and
+        //    attributed-text descriptions.
         var leafStrings: [String] = []
         collectLeafStrings(parsed["viewDebugData"], into: &leafStrings)
 
-        // 1. Parse each attributed-string description into (text, font, size, ...).
-        var attrIndex: [String: TextRun] = [:]   // keyed by text content
-        for s in leafStrings {
-            if !s.contains("NSFont") { continue }   // fast reject
-            if let run = parseAttributedDescription(s) {
-                attrIndex[run.text] = run
+        // attributed-text descriptions index text content -> {font, size, alignment, lineSpacing, color}
+        var attrIndex: [String: AttrInfo] = [:]
+        for s in leafStrings where s.contains("NSFont") {
+            if let info = parseAttributedDescription(s) {
+                attrIndex[info.text] = info
             }
         }
 
-        // 2. Walk every display-list-item and pull (text "..." #:size (W,H))
-        //    plus the nearest enclosing frame + most-recent color.
-        var runs: [TextRun] = []
+        // 2. Walk every display-list-item s-expression and harvest items.
+        var items: [Item] = []
         for s in leafStrings where s.contains("display-list-item") {
-            runs.append(contentsOf: parseDisplayList(s))
+            items.append(contentsOf: walkDisplayList(s, attrIndex: attrIndex))
         }
 
-        // 3. Merge: the attribute description usually wins for font/size, the
-        //    display list wins for colour + frame.
-        var merged: [TextRun] = []
-        for r in runs {
-            var out = r
-            if let known = attrIndex[r.text] {
-                out.font = known.font ?? out.font
-                out.fontSize = known.fontSize ?? out.fontSize
-                out.alignment = known.alignment ?? out.alignment
-                out.lineSpacing = known.lineSpacing ?? out.lineSpacing
-            }
-            merged.append(out)
-        }
-
-        // De-dup by (text, frame size) so we don't repeat across multiple
-        // display-list copies of the same screen.
+        // De-dup: SwiftUI sometimes lists the same item twice (different render passes).
+        // Key by (identity, abs frame).
         var seen = Set<String>()
-        merged = merged.filter { r in
-            let key = "\(r.text)|\(r.width ?? -1)|\(r.height ?? -1)"
-            if seen.contains(key) { return false }
-            seen.insert(key)
-            return true
+        items = items.filter {
+            let k = "\($0.identity)|\($0.x)|\($0.y)|\($0.w)|\($0.h)|\($0.kind)|\($0.text ?? "")"
+            if seen.contains(k) { return false }
+            seen.insert(k); return true
         }
 
-        if merged.isEmpty {
-            return "(no text runs detected — try the full JSON output without --summary)"
+        if items.isEmpty {
+            return "(no display-list items decoded — try the full JSON output without --summary)"
         }
 
-        // Tabular render. We use Swift String padding instead of String(format:)
-        // because %s expects C strings and crashes on Swift String values.
+        return formatTable(items)
+    }
+
+    // MARK: - Table render
+
+    private static func formatTable(_ items: [Item]) -> String {
         func pad(_ s: String, _ n: Int) -> String {
             let len = s.count
-            if len >= n { return clip(s, n) }
+            if len >= n { return clipString(s, n) }
             return s + String(repeating: " ", count: n - len)
         }
 
-        let header = pad("TEXT", 44) + "  " + pad("FONT", 30) + "  "
-                   + pad("SIZE", 6) + "  " + pad("COLOR", 11) + "  "
-                   + pad("ALIGN", 9) + "  " + pad("LINE_SP", 8) + "  W×H"
-        var lines = [header, String(repeating: "-", count: header.count)]
-        for r in merged {
-            let text = pad(r.text, 44)
-            let font = pad(r.font ?? "?", 30)
-            let size = pad(r.fontSize.map { String(format: "%.0fpt", $0) } ?? "?", 6)
-            let color = pad(r.color ?? "?", 11)
-            let align = pad(r.alignment ?? "?", 9)
-            let lspc  = pad(r.lineSpacing.map { String(format: "%.0f", $0) } ?? "?", 8)
-            let wh = (r.width != nil && r.height != nil)
-                ? String(format: "%.0f×%.0f", r.width!, r.height!) : "?"
-            lines.append("\(text)  \(font)  \(size)  \(color)  \(align)  \(lspc)  \(wh)")
+        let columns = [
+            ("ID", 5), ("KIND", 9),
+            ("X", 4), ("Y", 4), ("W", 4), ("H", 4),
+            ("ALPHA", 5), ("RADIUS", 7),
+            ("CONTENT", 64),
+        ]
+        var header = ""
+        for (h, w) in columns { header += pad(h, w) + "  " }
+        var lines = [header.trimmingCharacters(in: .whitespaces),
+                     String(repeating: "-", count: header.count - 2)]
+
+        for it in items {
+            var content = ""
+            switch it.kind {
+            case "text":
+                let parts: [String] = [
+                    it.text.map { "\"\($0)\"" } ?? "",
+                    it.font ?? "?",
+                    it.fontSize.map { String(format: "%.0fpt", $0) } ?? "",
+                    it.fillColor ?? "",
+                    it.alignment ?? "",
+                    it.lineSpacing.map { "lsp=\(Int($0))" } ?? "",
+                ]
+                content = parts.filter { !$0.isEmpty }.joined(separator: " ")
+            case "fill":
+                content = it.fillColor ?? ""
+            case "image":
+                if let sz = it.imageSize { content = String(format: "img(%.0f×%.0f)", sz.0, sz.1) }
+            case "platform":
+                content = "(platform-view — UIKit/AppKit child not introspected here)"
+            default:
+                content = ""
+            }
+
+            var row = ""
+            row += pad(it.identity.isEmpty ? "-" : it.identity, 5) + "  "
+            row += pad(it.kind, 9) + "  "
+            row += pad(String(format: "%.0f", it.x), 4) + "  "
+            row += pad(String(format: "%.0f", it.y), 4) + "  "
+            row += pad(String(format: "%.0f", it.w), 4) + "  "
+            row += pad(String(format: "%.0f", it.h), 4) + "  "
+            row += pad(String(format: "%.2f", it.opacity), 5) + "  "
+            row += pad(it.cornerRadius.map { String(format: "%.1f", $0) } ?? "-", 7) + "  "
+            row += clipString(content, 64)
+            lines.append(row)
         }
+
+        // Footer documenting unrepresentable dimensions so consumers know
+        // to consult the source code for them.
+        lines.append("")
+        lines.append("Notes:")
+        lines.append("  - Border (width/color), shadow (color/blur/offset), and Button/Toggle state")
+        lines.append("    (enabled/pressed/focused) cannot be extracted from SwiftUI's display list.")
+        lines.append("    Audit those at the source-code layer; this table does not represent them.")
+        lines.append("  - RADIUS is heuristic, derived from clip-path geometry; may be ± 1pt off the")
+        lines.append("    SwiftUI source value due to anti-alias path expansion.")
+
         return lines.joined(separator: "\n")
     }
 
-    private static func clip(_ s: String, _ n: Int) -> String {
+    private static func clipString(_ s: String, _ n: Int) -> String {
         if s.count <= n { return s }
         return String(s.prefix(n - 1)) + "…"
     }
@@ -431,109 +476,402 @@ private enum SwiftUIDebugSummary {
         }
     }
 
-    /// Parses strings like:
-    ///   `登录即可自动同步媒体库影片数据{
-    ///       NSColor = "sRGB ... 0.0352941 0.0352941 0.0392157 1";
-    ///       NSFont  = "\".SFNS-Regular 14.00 pt. ...\"";
-    ///       NSParagraphStyle = "Alignment Center, LineSpacing 8, ...";
-    ///   }`
-    private static func parseAttributedDescription(_ s: String) -> TextRun? {
+    // MARK: - Attributed-string description parsing
+
+    struct AttrInfo {
+        var text: String
+        var font: String?
+        var fontSize: Double?
+        var alignment: String?
+        var lineSpacing: Double?
+        var color: String?
+    }
+
+    private static func parseAttributedDescription(_ s: String) -> AttrInfo? {
         guard let braceIdx = s.firstIndex(of: "{") else { return nil }
         let text = String(s[..<braceIdx])
-        // Reject obviously non-attributed strings.
         if text.contains("\n") || text.count > 200 { return nil }
         if !s.contains("NSFont") { return nil }
 
-        var run = TextRun(text: text)
+        var info = AttrInfo(text: text)
 
-        // Font + point size: ".SFNS-Semibold 14.00 pt"
-        if let fontMatch = s.range(of: "([.A-Za-z0-9-]+)\\s+(\\d+(?:\\.\\d+)?)\\s*pt", options: .regularExpression) {
-            let frag = String(s[fontMatch])
-            let parts = frag.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+        if let r = s.range(of: "([.A-Za-z0-9-]+)\\s+(\\d+(?:\\.\\d+)?)\\s*pt", options: .regularExpression) {
+            let parts = s[r].split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
             if parts.count >= 2 {
-                run.font = String(parts[0])
-                run.fontSize = Double(parts[1])
+                info.font = String(parts[0])
+                info.fontSize = Double(parts[1])
             }
         }
-
-        // Alignment
-        if let r = s.range(of: "Alignment\\s+(\\w+)", options: .regularExpression) {
-            let m = String(s[r])
-            if let p = m.split(separator: " ").last { run.alignment = String(p).trimmingCharacters(in: .punctuationCharacters) }
+        if let r = s.range(of: "Alignment\\s+(\\w+)", options: .regularExpression),
+           let p = s[r].split(separator: " ").last {
+            info.alignment = String(p).trimmingCharacters(in: .punctuationCharacters)
         }
-
-        // LineSpacing
-        if let r = s.range(of: "LineSpacing\\s+(\\d+(?:\\.\\d+)?)", options: .regularExpression) {
-            let m = String(s[r])
-            if let p = m.split(separator: " ").last { run.lineSpacing = Double(p) }
+        if let r = s.range(of: "LineSpacing\\s+(\\d+(?:\\.\\d+)?)", options: .regularExpression),
+           let p = s[r].split(separator: " ").last {
+            info.lineSpacing = Double(p)
         }
-
-        // NSColor sRGB: pull last 4 floats before alpha terminator.
         if let r = s.range(of: "NSColor\\s*=\\s*\"[^\"]+\"", options: .regularExpression) {
-            let segment = String(s[r])
-            let nums = segment.split(whereSeparator: { !"0123456789.".contains($0) })
+            let nums = s[r].split(whereSeparator: { !"0123456789.".contains($0) })
                 .compactMap { Double($0) }
             if nums.count >= 4 {
                 let r = nums[nums.count-4], g = nums[nums.count-3], b = nums[nums.count-2], a = nums[nums.count-1]
-                run.color = String(format: "#%02X%02X%02X%02X",
-                                   Int((r * 255).rounded()),
-                                   Int((g * 255).rounded()),
-                                   Int((b * 255).rounded()),
-                                   Int((a * 255).rounded()))
+                info.color = String(format: "#%02X%02X%02X%02X",
+                                    Int((r * 255).rounded()), Int((g * 255).rounded()),
+                                    Int((b * 255).rounded()), Int((a * 255).rounded()))
             }
         }
-
-        return run
+        return info
     }
 
-    /// Parses the giant display-list s-expression. We do a single forward pass:
-    /// track the most-recent (frame ...) and (color ...) we've seen, then emit
-    /// a TextRun every time we hit a (text "..." #:size (W, H)) form.
-    private static func parseDisplayList(_ s: String) -> [TextRun] {
-        var runs: [TextRun] = []
-        var lastColor: String?
+    // MARK: - S-expression parser
 
-        // Use NSRegularExpression once over the whole string to avoid the
-        // O(n²) substring stepping that earlier attempts hit + the
-        // string-index gymnastics that crashed.
-        let ns = s as NSString
-        let full = NSRange(location: 0, length: ns.length)
+    indirect enum Sexpr {
+        case atom(String)
+        case list([Sexpr])
+        case str(String)
+    }
 
-        let colorRE = try? NSRegularExpression(pattern: "\\(color\\s+#([0-9A-Fa-f]{8})\\)")
-        let textRE = try? NSRegularExpression(pattern: "\\(text\\s+\"([^\"]*)\"\\s+#:size\\s+\\(([\\d.]+)[\\s,]+([\\d.]+)\\)")
-
-        // Collect (offset, kind, captures...) tuples so we can interleave.
-        struct Hit { let location: Int; let isColor: Bool; let groups: [String] }
-        var hits: [Hit] = []
-        if let re = colorRE {
-            re.enumerateMatches(in: s, range: full) { m, _, _ in
-                guard let m = m, m.numberOfRanges >= 2 else { return }
-                let g = ns.substring(with: m.range(at: 1))
-                hits.append(Hit(location: m.range.location, isColor: true, groups: [g]))
-            }
-        }
-        if let re = textRE {
-            re.enumerateMatches(in: s, range: full) { m, _, _ in
-                guard let m = m, m.numberOfRanges >= 4 else { return }
-                let txt = ns.substring(with: m.range(at: 1))
-                let w = ns.substring(with: m.range(at: 2))
-                let h = ns.substring(with: m.range(at: 3))
-                hits.append(Hit(location: m.range.location, isColor: false, groups: [txt, w, h]))
-            }
-        }
-        hits.sort { $0.location < $1.location }
-
-        for h in hits {
-            if h.isColor {
-                lastColor = "#" + h.groups[0].uppercased()
+    private static func tokenize(_ s: String) -> [Substring] {
+        var out: [Substring] = []
+        let chars = Array(s)
+        var i = 0
+        while i < chars.count {
+            let c = chars[i]
+            if c == "(" || c == ")" {
+                out.append(Substring(String(c)))
+                i += 1
+            } else if c == "\"" {
+                // Read until matching unescaped quote
+                let start = i
+                i += 1
+                while i < chars.count, chars[i] != "\"" {
+                    if chars[i] == "\\" && i + 1 < chars.count { i += 2 } else { i += 1 }
+                }
+                i += 1
+                let str = String(chars[start..<min(i, chars.count)])
+                out.append(Substring(str))
+            } else if c.isWhitespace {
+                i += 1
             } else {
-                var run = TextRun(text: h.groups[0], width: Double(h.groups[1]),
-                                  height: Double(h.groups[2]), color: lastColor)
-                _ = run
-                runs.append(run)
+                let start = i
+                while i < chars.count, !chars[i].isWhitespace, chars[i] != "(", chars[i] != ")" {
+                    i += 1
+                }
+                out.append(Substring(String(chars[start..<i])))
             }
         }
-        return runs
+        return out
+    }
+
+    private static func parseSexpr(_ tokens: [Substring], _ pos: inout Int) -> Sexpr {
+        let tok = tokens[pos]; pos += 1
+        if tok == "(" {
+            var children: [Sexpr] = []
+            while pos < tokens.count, tokens[pos] != ")" {
+                children.append(parseSexpr(tokens, &pos))
+            }
+            if pos < tokens.count { pos += 1 } // consume ')'
+            return .list(children)
+        } else if tok.first == "\"" {
+            let raw = String(tok)
+            let trimmed = String(raw.dropFirst().dropLast())
+            return .str(trimmed)
+        } else {
+            return .atom(String(tok))
+        }
+    }
+
+    // MARK: - Display-list walker
+
+    /// Walks a display-list string and emits one Item per drawn primitive.
+    /// Tracks parent-relative frame accumulation so all rows have absolute
+    /// (X, Y) in the hosting view's local coordinate space.
+    private static func walkDisplayList(_ s: String, attrIndex: [String: AttrInfo]) -> [Item] {
+        let tokens = tokenize(s)
+        var pos = 0
+        // Top-level is `[ (display-list-item ...) ]` per Apple's framing.
+        // Skip the outer brackets if present.
+        var items: [Item] = []
+        // Filter only ( and ) and atoms — brackets [] are not expected to nest at this layer.
+        while pos < tokens.count, tokens[pos] != "(" { pos += 1 }
+        if pos >= tokens.count { return items }
+        let tree = parseSexpr(tokens, &pos)
+        walkNode(tree, originX: 0, originY: 0, opacity: 1.0, cornerRadius: nil,
+                 attrIndex: attrIndex, into: &items)
+        return items
+    }
+
+    private static func walkNode(_ node: Sexpr,
+                                 originX: Double, originY: Double,
+                                 opacity: Double,
+                                 cornerRadius: Double?,
+                                 attrIndex: [String: AttrInfo],
+                                 into items: inout [Item]) {
+        guard case .list(let children) = node else { return }
+        guard let head = children.first, case .atom(let headName) = head else {
+            for c in children {
+                walkNode(c, originX: originX, originY: originY, opacity: opacity,
+                         cornerRadius: cornerRadius, attrIndex: attrIndex, into: &items)
+            }
+            return
+        }
+
+        switch headName {
+        case "display-list-item":
+            // Top wrapper: just descend
+            for c in children.dropFirst() {
+                walkNode(c, originX: originX, originY: originY, opacity: opacity,
+                         cornerRadius: cornerRadius, attrIndex: attrIndex, into: &items)
+            }
+
+        case "item":
+            handleItem(children: Array(children.dropFirst()),
+                       parentOriginX: originX, parentOriginY: originY,
+                       parentOpacity: opacity, parentCornerRadius: cornerRadius,
+                       attrIndex: attrIndex, into: &items)
+
+        default:
+            // Unknown top-level — descend
+            for c in children {
+                walkNode(c, originX: originX, originY: originY, opacity: opacity,
+                         cornerRadius: cornerRadius, attrIndex: attrIndex, into: &items)
+            }
+        }
+    }
+
+    /// Handles the body of an `(item #:identity N #:version V #:required B (frame ...) ...)` form.
+    private static func handleItem(children: [Sexpr],
+                                   parentOriginX: Double, parentOriginY: Double,
+                                   parentOpacity: Double, parentCornerRadius: Double?,
+                                   attrIndex: [String: AttrInfo],
+                                   into items: inout [Item]) {
+        var identity = ""
+        var localFrame: (Double, Double, Double, Double) = (0, 0, 0, 0)
+        var bodyForms: [Sexpr] = []
+        var nodeOpacity: Double = 1.0
+        var nodeCornerRadius: Double? = nil
+
+        // Walk each form to extract identity + frame and stash the rest.
+        var i = 0
+        while i < children.count {
+            switch children[i] {
+            case .atom(let a):
+                if a.hasPrefix("#:identity"), i + 1 < children.count, case .atom(let v) = children[i+1] {
+                    identity = v
+                    i += 2
+                    continue
+                }
+                if a.hasPrefix("#:") {
+                    // Skip key/value attribute pair (e.g. #:version 12)
+                    i += 2
+                    continue
+                }
+                i += 1
+            case .list(let kids):
+                if let h = kids.first, case .atom(let hn) = h {
+                    if hn == "frame" {
+                        // (frame (X Y; W H))  -- inner is parsed as a list of atoms with the ; treated as part of token
+                        if let f = parseFrame(kids) {
+                            localFrame = f
+                        }
+                        i += 1; continue
+                    }
+                }
+                bodyForms.append(children[i])
+                i += 1
+            default:
+                i += 1
+            }
+        }
+
+        let absX = parentOriginX + localFrame.0
+        let absY = parentOriginY + localFrame.1
+        let w = localFrame.2
+        let h = localFrame.3
+
+        // Pre-pass over body forms: find effect with #:opacity, find any clip
+        // that wraps later children.
+        var contentSeed: String? = nil
+        var didEmit = false
+
+        for form in bodyForms {
+            guard case .list(let kids) = form, let head = kids.first,
+                  case .atom(let headName) = head else { continue }
+
+            switch headName {
+            case "effect":
+                // Look for #:opacity and #:platform-group atoms
+                var localOpacity = 1.0
+                var idx = 1
+                while idx < kids.count {
+                    if case .atom(let a) = kids[idx], a == "#:opacity",
+                       idx + 1 < kids.count, case .atom(let v) = kids[idx+1],
+                       let o = Double(v) {
+                        localOpacity = o
+                        idx += 2
+                        continue
+                    }
+                    if case .atom(_) = kids[idx] { idx += 1; continue }
+                    break
+                }
+                let nestedOpacity = parentOpacity * localOpacity * nodeOpacity
+                // Children of effect inherit any clip set by sibling clip forms.
+                var inheritedClip: Double? = nodeCornerRadius ?? parentCornerRadius
+                for inner in kids.dropFirst() {
+                    guard case .list(let innerKids) = inner,
+                          let innerHead = innerKids.first,
+                          case .atom(let innerName) = innerHead else { continue }
+                    if innerName == "clip" {
+                        // find (path ...) inside; pass the item's outer
+                        // width/height so the heuristic can bound the radius.
+                        for c in innerKids.dropFirst() {
+                            if case .list(let pk) = c, let pkHead = pk.first,
+                               case .atom("path") = pkHead {
+                                inheritedClip = extractRoundedRectRadius(from: pk, width: w, height: h)
+                            }
+                        }
+                        continue
+                    }
+                    if innerName == "item" {
+                        handleItem(children: Array(innerKids.dropFirst()),
+                                   parentOriginX: absX, parentOriginY: absY,
+                                   parentOpacity: nestedOpacity,
+                                   parentCornerRadius: inheritedClip,
+                                   attrIndex: attrIndex, into: &items)
+                    }
+                }
+
+            case "color":
+                // (color #RRGGBBAA) — emit a fill row for *this* item
+                if kids.count >= 2, case .atom(let a) = kids[1] {
+                    var color = a
+                    if color.hasPrefix("#") {
+                        color = "#" + String(color.dropFirst()).uppercased()
+                    }
+                    items.append(Item(
+                        identity: identity, kind: "fill",
+                        x: absX, y: absY, w: w, h: h,
+                        opacity: parentOpacity * nodeOpacity,
+                        cornerRadius: parentCornerRadius,
+                        fillColor: color, imageSize: nil,
+                        text: nil, font: nil, fontSize: nil, alignment: nil, lineSpacing: nil))
+                    didEmit = true
+                }
+
+            case "text":
+                // (text "..." #:size (W H))
+                var text = ""
+                if kids.count >= 2, case .str(let str) = kids[1] {
+                    text = str
+                }
+                let attr = attrIndex[text]
+                items.append(Item(
+                    identity: identity, kind: "text",
+                    x: absX, y: absY, w: w, h: h,
+                    opacity: parentOpacity * nodeOpacity,
+                    cornerRadius: parentCornerRadius,
+                    fillColor: attr?.color, imageSize: nil,
+                    text: text, font: attr?.font, fontSize: attr?.fontSize,
+                    alignment: attr?.alignment, lineSpacing: attr?.lineSpacing))
+                didEmit = true
+
+            case "image":
+                // (image #:size (W H))
+                var imgSize: (Double, Double)? = nil
+                for k in kids {
+                    if case .list(let pk) = k, pk.count == 2,
+                       case .atom(let aw) = pk[0], case .atom(let ah) = pk[1],
+                       let dw = Double(aw), let dh = Double(ah) {
+                        imgSize = (dw, dh)
+                    }
+                }
+                items.append(Item(
+                    identity: identity, kind: "image",
+                    x: absX, y: absY, w: w, h: h,
+                    opacity: parentOpacity * nodeOpacity,
+                    cornerRadius: parentCornerRadius,
+                    fillColor: nil, imageSize: imgSize,
+                    text: nil, font: nil, fontSize: nil, alignment: nil, lineSpacing: nil))
+                didEmit = true
+
+            case "platform-view":
+                items.append(Item(
+                    identity: identity, kind: "platform",
+                    x: absX, y: absY, w: w, h: h,
+                    opacity: parentOpacity * nodeOpacity,
+                    cornerRadius: parentCornerRadius,
+                    fillColor: nil, imageSize: nil,
+                    text: nil, font: nil, fontSize: nil, alignment: nil, lineSpacing: nil))
+                didEmit = true
+
+            case "content-seed":
+                if kids.count >= 2, case .atom(let s) = kids[1] { contentSeed = s }
+                _ = contentSeed
+
+            default:
+                break
+            }
+        }
+
+        if !didEmit && (w > 0 || h > 0) {
+            items.append(Item(
+                identity: identity, kind: "group",
+                x: absX, y: absY, w: w, h: h,
+                opacity: parentOpacity * nodeOpacity,
+                cornerRadius: parentCornerRadius,
+                fillColor: nil, imageSize: nil,
+                text: nil, font: nil, fontSize: nil, alignment: nil, lineSpacing: nil))
+        }
+    }
+
+    /// Parses `(frame (X Y; W H))`. The `X Y; W H` block tokenises with `;`
+    /// as part of one atom because our tokenizer keeps it attached to `Y`.
+    private static func parseFrame(_ kids: [Sexpr]) -> (Double, Double, Double, Double)? {
+        guard kids.count >= 2, case .list(let nums) = kids[1] else { return nil }
+        // Concatenate all atoms, split on whitespace + `;` to recover four floats.
+        var floats: [Double] = []
+        for n in nums {
+            if case .atom(let a) = n {
+                let cleaned = a.replacingOccurrences(of: ";", with: " ")
+                                .replacingOccurrences(of: ",", with: " ")
+                for tok in cleaned.split(separator: " ") {
+                    if let d = Double(tok) { floats.append(d) }
+                }
+            }
+        }
+        if floats.count >= 4 {
+            return (floats[0], floats[1], floats[2], floats[3])
+        }
+        return nil
+    }
+
+    /// Heuristic corner-radius extractor for a SwiftUI rounded-rect / capsule
+    /// clip path. SwiftUI emits the path starting at point `(W, R) m` where
+    /// `R` is the corner radius (from the right-edge midpoint going down).
+    /// We look at the first `m` (move-to) command and read the two numbers
+    /// preceding it; the second one is the radius. Returns nil if the path
+    /// doesn't start with a move-to (i.e. not a rounded-rect-shaped clip).
+    private static func extractRoundedRectRadius(from kids: [Sexpr], width: Double, height: Double) -> Double? {
+        guard width > 0, height > 0 else { return nil }
+        // Read out the path's atoms in order.
+        var atoms: [String] = []
+        for k in kids {
+            if case .atom(let a) = k { atoms.append(a) }
+        }
+        // Find the first 'm' command and read the two preceding floats.
+        for (i, atom) in atoms.enumerated() {
+            if atom == "m", i >= 2,
+               let x = Double(atoms[i-2]),
+               let y = Double(atoms[i-1]) {
+                // SwiftUI starts at (W, R); a capsule's R == H/2.
+                // Sanity-check: y must be in (0, H/2 + 1pt slop].
+                let limit = min(width, height) / 2 + 1
+                if y > 0 && y <= limit && abs(x - width) < 1 {
+                    return y
+                }
+            }
+        }
+        return nil
     }
 }
 

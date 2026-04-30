@@ -344,35 +344,17 @@
                     raw = ((id (*)(id, SEL))objc_msgSend)(resolvedObject, makeViewDebugDataSel);
                 } @catch (__unused id _) {}
                 if ([raw isKindOfClass:[NSData class]]) {
-                    NSData *d = (NSData *)raw;
-                    NSError *jsonErr = nil;
-                    id parsed = [NSJSONSerialization JSONObjectWithData:d options:0 error:&jsonErr];
-                    if (parsed) {
-                        response[@"viewDebugData"] = sanitize(parsed);
-                        response[@"viewDebugDataFormat"] = @"json";
-                    } else {
-                        NSError *plistErr = nil;
-                        id plist = [NSPropertyListSerialization propertyListWithData:d
-                                                                             options:NSPropertyListImmutable
-                                                                              format:NULL
-                                                                               error:&plistErr];
-                        if (plist) {
-                            response[@"viewDebugData"] = sanitize(plist);
-                            response[@"viewDebugDataFormat"] = @"plist";
-                        } else {
-                            NSMutableString *hex = [NSMutableString stringWithCapacity:d.length * 2];
-                            const uint8_t *b = d.bytes;
-                            for (NSUInteger i = 0; i < MIN((NSUInteger)512, d.length); i++) {
-                                [hex appendFormat:@"%02x", b[i]];
-                            }
-                            response[@"viewDebugData"] = hex;
-                            response[@"viewDebugDataFormat"] = @"hex";
-                            response[@"viewDebugDataLength"] = @(d.length);
-                        }
-                    }
+                    // Forward the raw bytes verbatim — NSData is plist-safe so
+                    // it survives NSKeyedArchiver, and the client decodes the
+                    // payload itself. This keeps every field that Apple's
+                    // selector returned (including Swift values that wouldn't
+                    // survive description-fallback sanitisation).
+                    response[@"viewDebugData"] = raw;
+                    response[@"viewDebugDataFormat"] = @"raw";
+                    response[@"viewDebugDataLength"] = @([(NSData *)raw length]);
                 } else if (raw) {
-                    response[@"viewDebugData"] = [raw description];
-                    response[@"viewDebugDataFormat"] = @"description";
+                    response[@"viewDebugData"] = sanitize(raw);
+                    response[@"viewDebugDataFormat"] = @"sanitized";
                 }
             }
 

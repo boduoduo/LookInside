@@ -1159,7 +1159,33 @@ static id LICSafeNumber(double v) {
         return nil;
     }
 
-    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:response.data options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:error];
+    NSMutableDictionary *out = [(NSDictionary *)response.data mutableCopy];
+
+    // Server returns makeViewDebugData's raw NSData with format="raw" so we
+    // can JSON-decode it client-side without losing the Swift-typed leaves
+    // that a server-side description fallback would have flattened.
+    NSData *rawVDD = out[@"viewDebugData"];
+    if ([rawVDD isKindOfClass:[NSData class]]) {
+        NSError *jsonErr = nil;
+        id parsed = [NSJSONSerialization JSONObjectWithData:rawVDD options:NSJSONReadingFragmentsAllowed error:&jsonErr];
+        if (parsed) {
+            out[@"viewDebugData"] = parsed;
+            out[@"viewDebugDataFormat"] = @"json";
+        } else {
+            // Best-effort fallback: dump first 1KB as hex so callers can debug.
+            NSData *d = rawVDD;
+            NSMutableString *hex = [NSMutableString stringWithCapacity:1024];
+            const uint8_t *b = d.bytes;
+            for (NSUInteger i = 0; i < MIN((NSUInteger)1024, d.length); i++) {
+                [hex appendFormat:@"%02x", b[i]];
+            }
+            out[@"viewDebugData"] = hex;
+            out[@"viewDebugDataFormat"] = @"hex";
+            out[@"viewDebugDataLength"] = @(d.length);
+        }
+    }
+
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:out options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:error];
     if (!jsonData) {
         return nil;
     }

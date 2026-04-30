@@ -220,10 +220,7 @@
         NSArray<LKS_TextDrawRecord *> *records =
             [LKS_TextDrawHook snapshotWithBlock:^{
                 if (!ctx) return;
-                // First: a self-test draw using a known font + glyphs. This
-                // proves the hook is wired up regardless of whether SwiftUI
-                // hits CTFontDrawGlyphs through some private alternative.
-                // We render at offscreen origin so it never touches the host.
+                // Self-probe: prove the hook is wired.
                 CTFontRef probeFont = CTFontCreateWithName(CFSTR("Helvetica"), 12, NULL);
                 if (probeFont) {
                     UniChar probeChars[] = { 'L', 'K', 'S' };
@@ -234,9 +231,13 @@
                     CFRelease(probeFont);
                 }
 
-                // Then drive the real layer through every documented entry
-                // point. SwiftUI _CGDrawingLayer caches its contents so we
-                // also force a redisplay.
+                // SwiftUI _CGDrawingLayer caches its rasterised text in
+                // `layer.contents` and skips its draw closure on subsequent
+                // displays. Wipe contents + force a fresh display to get the
+                // closure to re-execute. This is safe because dyld will
+                // re-render the layer in the next CA commit cycle anyway.
+                id savedContents = layer.contents;
+                layer.contents = nil;
                 [layer setNeedsDisplay];
                 if ([layer respondsToSelector:@selector(displayIfNeeded)]) {
                     [layer displayIfNeeded];
@@ -245,6 +246,7 @@
                 }
                 [layer drawInContext:ctx];
                 [layer renderInContext:ctx];
+                if (layer.contents == nil) layer.contents = savedContents;
             }];
 
         if (ctx) CGContextRelease(ctx);

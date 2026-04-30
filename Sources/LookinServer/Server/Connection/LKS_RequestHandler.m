@@ -146,12 +146,34 @@
     }
 
     if (requestType == LookinRequestTypeAllAttrGroups) {
-        CALayer *layer = (CALayer *)[NSObject lks_objectWithOid:[(NSNumber *)object unsignedLongValue]];
-        if (![layer isKindOfClass:[CALayer class]]) {
+        NSObject *resolvedObject = [NSObject lks_objectWithOid:[(NSNumber *)object unsignedLongValue]];
+        NSArray<LookinAttributesGroup *> *groups = nil;
+        if ([resolvedObject isKindOfClass:[CALayer class]]) {
+            groups = [LKS_AttrGroupsMaker attrGroupsForLayer:(CALayer *)resolvedObject];
+        }
+#if TARGET_OS_OSX
+        else if ([resolvedObject isKindOfClass:[NSView class]]) {
+            groups = [LKS_AttrGroupsMaker attrGroupsForView:(NSView *)resolvedObject];
+        } else if ([resolvedObject isKindOfClass:[NSWindow class]]) {
+            groups = [LKS_AttrGroupsMaker attrGroupsForWindow:(NSWindow *)resolvedObject];
+        }
+#endif
+#if TARGET_OS_IPHONE
+        else if ([resolvedObject isKindOfClass:[UIView class]]) {
+            // Fall back to the view's layer; the layer attribute set is what
+            // historically backed UIView attribute browsing on iOS/tvOS/visionOS.
+            groups = [LKS_AttrGroupsMaker attrGroupsForLayer:((UIView *)resolvedObject).layer];
+        } else if (@available(iOS 13.0, tvOS 13.0, *)) {
+            if ([resolvedObject isKindOfClass:[UIWindowScene class]]) {
+                groups = [LKS_AttrGroupsMaker attrGroupsForWindowScene:(UIWindowScene *)resolvedObject];
+            }
+        }
+#endif
+        if (!groups) {
             [self _respondWithError:LookinErr_ObjNotFound requestType:requestType tag:tag];
             return;
         }
-        [self _respondWithData:[LKS_AttrGroupsMaker attrGroupsForLayer:layer] requestType:requestType tag:tag];
+        [self _respondWithData:groups requestType:requestType tag:tag];
         return;
     }
 

@@ -298,11 +298,45 @@
         SEL makeViewDebugDataSel = @selector(makeViewDebugData);
         SEL accessibilityDebugSel = @selector(_accessibilitySwiftUIDebugData);
 
-        // SwiftUI debug data must be collected on the main thread — the
-        // selectors walk the live view graph, which requires CA/AppKit
-        // synchronisation. Dispatch synchronously from our request thread
-        // and bail with a clear error if the caller already happens to be
-        // on the main thread (re-entrancy would deadlock).
+        // Anything we put on the wire is sent through NSKeyedArchiver. The
+        // accessibility selector commonly returns NSArray<__SwiftValue *>
+        // (Swift structs boxed for ObjC), and __SwiftValue does NOT conform
+        // to NSCoding, so naively returning the array crashes the host with
+        // -[__SwiftValue encodeWithCoder:]: unrecognized selector. We convert
+        // anything non-archivable to its -description string so the wire
+        // payload stays safe; JSON-parsed payloads from makeViewDebugData are
+        // already pure NSArray/NSDictionary/NSString/NSNumber and pass through
+        // verbatim.
+        __block id (^sanitize)(id) = nil;
+        sanitize = ^id(id obj) {
+            if (!obj || [obj isKindOfClass:[NSNull class]]) return obj;
+            if ([obj isKindOfClass:[NSString class]] ||
+                [obj isKindOfClass:[NSNumber class]]) return obj;
+            if ([obj isKindOfClass:[NSArray class]]) {
+                NSMutableArray *arr = [NSMutableArray arrayWithCapacity:[obj count]];
+                for (id sub in (NSArray *)obj) {
+                    id s = sanitize(sub);
+                    [arr addObject:s ?: [NSNull null]];
+                }
+                return arr;
+            }
+            if ([obj isKindOfClass:[NSDictionary class]]) {
+                NSMutableDictionary *out = [NSMutableDictionary dictionary];
+                [(NSDictionary *)obj enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
+                    NSString *k = [key isKindOfClass:[NSString class]] ? key : [key description];
+                    if (k) out[k] = sanitize(value) ?: [NSNull null];
+                }];
+                return out;
+            }
+            // Fallback: any non-plist class (including __SwiftValue) becomes
+            // its description string so NSKeyedArchiver can encode it.
+            @try {
+                return [obj description] ?: @"";
+            } @catch (__unused id _) {
+                return @"<undescribable>";
+            }
+        };
+
         void (^collect)(void) = ^{
             if ([resolvedObject respondsToSelector:makeViewDebugDataSel]) {
                 id raw = nil;
@@ -314,7 +348,7 @@
                     NSError *jsonErr = nil;
                     id parsed = [NSJSONSerialization JSONObjectWithData:d options:0 error:&jsonErr];
                     if (parsed) {
-                        response[@"viewDebugData"] = parsed;
+                        response[@"viewDebugData"] = sanitize(parsed);
                         response[@"viewDebugDataFormat"] = @"json";
                     } else {
                         NSError *plistErr = nil;
@@ -323,7 +357,7 @@
                                                                               format:NULL
                                                                                error:&plistErr];
                         if (plist) {
-                            response[@"viewDebugData"] = plist;
+                            response[@"viewDebugData"] = sanitize(plist);
                             response[@"viewDebugDataFormat"] = @"plist";
                         } else {
                             NSMutableString *hex = [NSMutableString stringWithCapacity:d.length * 2];
@@ -347,10 +381,8 @@
                 @try {
                     raw = ((id (*)(id, SEL))objc_msgSend)(resolvedObject, accessibilityDebugSel);
                 } @catch (__unused id _) {}
-                if ([raw isKindOfClass:[NSArray class]] || [raw isKindOfClass:[NSDictionary class]]) {
-                    response[@"accessibilityDebugData"] = raw;
-                } else if (raw) {
-                    response[@"accessibilityDebugData"] = [raw description];
+                if (raw) {
+                    response[@"accessibilityDebugData"] = sanitize(raw);
                 }
             }
         };

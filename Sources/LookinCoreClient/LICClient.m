@@ -2,6 +2,10 @@
 
 #import "LookinCore.h"
 #import "../LookinCore/LookinStaticAsyncUpdateTask.h"
+#import "../LookinCore/LookinAttributesGroup.h"
+#import "../LookinCore/LookinAttributesSection.h"
+#import "../LookinCore/LookinAttribute.h"
+#import "../LookinCore/LookinAttrType.h"
 #import <dispatch/dispatch.h>
 
 static NSString * const LICErrorDomain = @"LookInsideCLI";
@@ -257,6 +261,8 @@ typedef NS_ENUM(NSInteger, LICErrorCode) {
 - (nullable LICChannelSession *)openSessionForTarget:(LICDiscoveredTarget *)target error:(NSError **)error;
 - (nullable LookinHierarchyInfo *)fetchHierarchyWithSession:(LICChannelSession *)session error:(NSError **)error;
 - (nullable NSArray<LookinDisplayItemDetail *> *)fetchHierarchyDetailsWithHierarchyInfo:(LookinHierarchyInfo *)hierarchyInfo preferViewOID:(BOOL)preferViewOID session:(LICChannelSession *)session error:(NSError **)error;
+- (nullable NSArray<LookinDisplayItemDetail *> *)fetchAttrDetailsWithHierarchyInfo:(LookinHierarchyInfo *)hierarchyInfo preferViewOID:(BOOL)preferViewOID session:(LICChannelSession *)session error:(NSError **)error;
+- (NSArray *)attrGroupsJSONArrayFromGroups:(NSArray<LookinAttributesGroup *> *)groups;
 @end
 
 static unsigned long LICBestObjectOIDForItem(LookinDisplayItem *item, BOOL preferViewOID) {
@@ -270,6 +276,14 @@ static unsigned long LICBestObjectOIDForItem(LookinDisplayItem *item, BOOL prefe
         return item.viewObject.oid;
     }
     return 0;
+}
+
+/// JSON-safe number. Returns NSNull for NaN / Infinity since NSJSONSerialization rejects them.
+static id LICSafeNumber(double v) {
+    if (isnan(v) || isinf(v)) {
+        return [NSNull null];
+    }
+    return @(v);
 }
 
 @implementation LICClient
@@ -314,6 +328,50 @@ static unsigned long LICBestObjectOIDForItem(LookinDisplayItem *item, BOOL prefe
     }
 
     return [self renderTree:hierarchyInfo];
+}
+
+- (nullable NSString *)hierarchyWithAttrsJSONForTargetID:(NSString *)targetID error:(NSError **)error {
+    LICDiscoveredTarget *target = [self resolveTargetID:targetID error:error];
+    if (!target) {
+        return nil;
+    }
+
+    LICChannelSession *session = [self openSessionForTarget:target error:error];
+    if (!session) {
+        return nil;
+    }
+
+    LookinHierarchyInfo *hierarchyInfo = [self fetchHierarchyWithSession:session error:error];
+    if (!hierarchyInfo) {
+        [session close];
+        return nil;
+    }
+
+    BOOL preferViewOID = (hierarchyInfo.appInfo.deviceType == LookinAppInfoDeviceMac);
+    NSArray<LookinDisplayItemDetail *> *details = [self fetchAttrDetailsWithHierarchyInfo:hierarchyInfo preferViewOID:preferViewOID session:session error:error];
+    [session close];
+    if (!details) {
+        return nil;
+    }
+
+    NSMutableDictionary<NSNumber *, NSArray *> *attrsByOid = [NSMutableDictionary dictionary];
+    for (LookinDisplayItemDetail *detail in details) {
+        if (detail.failureCode != 0 || detail.displayItemOid == 0) {
+            continue;
+        }
+        NSArray<LookinAttributesGroup *> *groups = detail.attributesGroupList;
+        if (groups.count == 0) {
+            continue;
+        }
+        attrsByOid[@(detail.displayItemOid)] = [self attrGroupsJSONArrayFromGroups:groups];
+    }
+
+    NSDictionary *payload = [self hierarchyJSONObject:hierarchyInfo attrsByOid:attrsByOid];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:payload options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:error];
+    if (!data) {
+        return nil;
+    }
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
 }
 
 - (NSURL *)exportTargetID:(NSString *)targetID outputPath:(NSString *)outputPath error:(NSError **)error {
@@ -737,6 +795,41 @@ static unsigned long LICBestObjectOIDForItem(LookinDisplayItem *item, BOOL prefe
     return (NSArray<LookinDisplayItemDetail *> *)response.data;
 }
 
+- (NSArray<LookinDisplayItemDetail *> *)fetchAttrDetailsWithHierarchyInfo:(LookinHierarchyInfo *)hierarchyInfo preferViewOID:(BOOL)preferViewOID session:(LICChannelSession *)session error:(NSError **)error {
+    NSArray<LookinDisplayItem *> *flatItems = [LookinDisplayItem flatItemsFromHierarchicalItems:hierarchyInfo.displayItems ?: @[]];
+    NSMutableArray<LookinStaticAsyncUpdateTask *> *tasks = [NSMutableArray array];
+    NSMutableSet<NSNumber *> *seenOids = [NSMutableSet set];
+    for (LookinDisplayItem *item in flatItems) {
+        unsigned long oid = LICBestObjectOIDForItem(item, preferViewOID);
+        if (oid == 0 || [seenOids containsObject:@(oid)]) {
+            continue;
+        }
+        [seenOids addObject:@(oid)];
+
+        LookinStaticAsyncUpdateTask *task = [LookinStaticAsyncUpdateTask new];
+        task.oid = oid;
+        task.taskType = LookinStaticAsyncUpdateTaskTypeNoScreenshot;
+        task.attrRequest = LookinDetailUpdateTaskAttrRequest_Need;
+        task.clientReadableVersion = LOOKIN_SERVER_READABLE_VERSION;
+        [tasks addObject:task];
+    }
+
+    LookinStaticAsyncUpdateTasksPackage *package = [LookinStaticAsyncUpdateTasksPackage new];
+    package.tasks = tasks.copy;
+
+    LookinConnectionResponseAttachment *response = [session validatedRequestType:LookinRequestTypeHierarchyDetails data:@[package] pingTimeout:2 requestTimeout:60 error:error];
+    if (!response) {
+        return nil;
+    }
+    if (![response.data isKindOfClass:[NSArray class]]) {
+        if (error) {
+            *error = [NSError errorWithDomain:LICErrorDomain code:LICErrorCodeInvalidResponse userInfo:@{NSLocalizedDescriptionKey:@"Hierarchy details payload was not an array."}];
+        }
+        return nil;
+    }
+    return (NSArray<LookinDisplayItemDetail *> *)response.data;
+}
+
 - (nullable LICDiscoveredTarget *)directTargetForTransport:(NSString *)transport port:(NSInteger)port deviceID:(nullable NSString *)deviceID appInfoIdentifier:(NSInteger)appInfoIdentifier error:(NSError **)error {
     LICChannelSession *session = nil;
     if ([transport isEqualToString:@"usb"]) {
@@ -805,9 +898,13 @@ static unsigned long LICBestObjectOIDForItem(LookinDisplayItem *item, BOOL prefe
 }
 
 - (NSDictionary *)hierarchyJSONObject:(LookinHierarchyInfo *)hierarchyInfo {
+    return [self hierarchyJSONObject:hierarchyInfo attrsByOid:nil];
+}
+
+- (NSDictionary *)hierarchyJSONObject:(LookinHierarchyInfo *)hierarchyInfo attrsByOid:(nullable NSDictionary<NSNumber *, NSArray *> *)attrsByOid {
     NSMutableArray *items = [NSMutableArray array];
     for (LookinDisplayItem *item in hierarchyInfo.displayItems ?: @[]) {
-        [items addObject:[self itemJSONObject:item]];
+        [items addObject:[self itemJSONObject:item attrsByOid:attrsByOid]];
     }
     return @{
         @"app": [self appJSONObject:hierarchyInfo.appInfo],
@@ -840,12 +937,16 @@ static unsigned long LICBestObjectOIDForItem(LookinDisplayItem *item, BOOL prefe
 }
 
 - (NSDictionary *)itemJSONObject:(LookinDisplayItem *)item {
+    return [self itemJSONObject:item attrsByOid:nil];
+}
+
+- (NSDictionary *)itemJSONObject:(LookinDisplayItem *)item attrsByOid:(nullable NSDictionary<NSNumber *, NSArray *> *)attrsByOid {
     LookinObject *displayObject = item.displayingObject;
     NSMutableArray *children = [NSMutableArray array];
     for (LookinDisplayItem *child in item.subitems ?: @[]) {
-        [children addObject:[self itemJSONObject:child]];
+        [children addObject:[self itemJSONObject:child attrsByOid:attrsByOid]];
     }
-    return @{
+    NSMutableDictionary *dict = [@{
         @"className": [displayObject rawClassName] ?: @"",
         @"memoryAddress": displayObject.memoryAddress ?: @"",
         @"oid": @(displayObject.oid),
@@ -856,15 +957,31 @@ static unsigned long LICBestObjectOIDForItem(LookinDisplayItem *item, BOOL prefe
         @"representedAsKeyWindow": @(item.representedAsKeyWindow),
         @"customDisplayTitle": item.customDisplayTitle ?: @"",
         @"children": children,
-    };
+    } mutableCopy];
+    if (item.layerObject.oid && item.layerObject.oid != displayObject.oid) {
+        dict[@"layerOid"] = @(item.layerObject.oid);
+    }
+    if (attrsByOid) {
+        NSArray *attrGroups = attrsByOid[@(displayObject.oid)];
+        if (!attrGroups && item.layerObject.oid) {
+            attrGroups = attrsByOid[@(item.layerObject.oid)];
+        }
+        if (!attrGroups && item.viewObject.oid) {
+            attrGroups = attrsByOid[@(item.viewObject.oid)];
+        }
+        if (attrGroups) {
+            dict[@"attrGroups"] = attrGroups;
+        }
+    }
+    return dict;
 }
 
 - (NSDictionary *)rectDictionary:(CGRect)rect {
     return @{
-        @"x": @(rect.origin.x),
-        @"y": @(rect.origin.y),
-        @"width": @(rect.size.width),
-        @"height": @(rect.size.height),
+        @"x": LICSafeNumber(rect.origin.x),
+        @"y": LICSafeNumber(rect.origin.y),
+        @"width": LICSafeNumber(rect.size.width),
+        @"height": LICSafeNumber(rect.size.height),
     };
 }
 
@@ -887,6 +1004,9 @@ static unsigned long LICBestObjectOIDForItem(LookinDisplayItem *item, BOOL prefe
     LookinObject *displayObject = item.displayingObject;
     NSString *className = [displayObject rawClassName] ?: @"Unknown";
     [line appendFormat:@"- %@#%@", className, @(displayObject.oid)];
+    if (item.layerObject.oid && item.layerObject.oid != displayObject.oid) {
+        [line appendFormat:@"/L%@", @(item.layerObject.oid)];
+    }
     if (item.representedAsKeyWindow) {
         [line appendString:@" [keyWindow]"];
     }
@@ -916,6 +1036,139 @@ static unsigned long LICBestObjectOIDForItem(LookinDisplayItem *item, BOOL prefe
         return [NSString stringWithFormat:@"%@", @((NSInteger)value)];
     }
     return [NSString stringWithFormat:@"%.2f", value];
+}
+
+- (nullable NSString *)allAttrGroupsJSONForTargetID:(NSString *)targetID layerOID:(NSUInteger)oid error:(NSError **)error {
+    LICDiscoveredTarget *target = [self resolveTargetID:targetID error:error];
+    if (!target) {
+        return nil;
+    }
+
+    LICChannelSession *session = [self openSessionForTarget:target error:error];
+    if (!session) {
+        return nil;
+    }
+
+    LookinConnectionResponseAttachment *response = [session validatedRequestType:LookinRequestTypeAllAttrGroups data:@(oid) pingTimeout:2 requestTimeout:5 error:error];
+    [session close];
+    if (!response) {
+        return nil;
+    }
+
+    if (![response.data isKindOfClass:[NSArray class]]) {
+        if (error) {
+            *error = [NSError errorWithDomain:LICErrorDomain code:LICErrorCodeInvalidResponse userInfo:@{NSLocalizedDescriptionKey:@"AllAttrGroups payload was not an NSArray."}];
+        }
+        return nil;
+    }
+
+    NSArray *groupsArray = [self attrGroupsJSONArrayFromGroups:(NSArray<LookinAttributesGroup *> *)response.data];
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:groupsArray options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:error];
+    if (!jsonData) {
+        return nil;
+    }
+    return [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+}
+
+- (NSArray *)attrGroupsJSONArrayFromGroups:(NSArray<LookinAttributesGroup *> *)groups {
+    NSMutableArray *groupsArray = [NSMutableArray array];
+    for (LookinAttributesGroup *group in groups) {
+        NSMutableArray *sectionsArray = [NSMutableArray array];
+        for (LookinAttributesSection *section in group.attrSections ?: @[]) {
+            NSMutableArray *attrsArray = [NSMutableArray array];
+            for (LookinAttribute *attr in section.attributes ?: @[]) {
+                id jsonValue = [NSNull null];
+                id value = attr.value;
+                LookinAttrType attrType = attr.attrType;
+
+                if (value == nil) {
+                    jsonValue = [NSNull null];
+                } else {
+                    switch (attrType) {
+                        case LookinAttrTypeChar:
+                        case LookinAttrTypeInt:
+                        case LookinAttrTypeShort:
+                        case LookinAttrTypeLong:
+                        case LookinAttrTypeLongLong:
+                        case LookinAttrTypeUnsignedChar:
+                        case LookinAttrTypeUnsignedInt:
+                        case LookinAttrTypeUnsignedShort:
+                        case LookinAttrTypeUnsignedLong:
+                        case LookinAttrTypeUnsignedLongLong:
+                        case LookinAttrTypeBOOL:
+                        case LookinAttrTypeEnumInt:
+                        case LookinAttrTypeEnumLong:
+                            jsonValue = value; // NSNumber
+                            break;
+                        case LookinAttrTypeFloat:
+                        case LookinAttrTypeDouble: {
+                            double dv = [(NSNumber *)value doubleValue];
+                            jsonValue = LICSafeNumber(dv);
+                            break;
+                        }
+                        case LookinAttrTypeNSString:
+                        case LookinAttrTypeEnumString:
+                            jsonValue = value; // NSString
+                            break;
+                        case LookinAttrTypeCGPoint: {
+                            CGPoint pt = [(NSValue *)value pointValue];
+                            jsonValue = @{@"x": LICSafeNumber(pt.x), @"y": LICSafeNumber(pt.y)};
+                            break;
+                        }
+                        case LookinAttrTypeCGSize: {
+                            CGSize sz = [(NSValue *)value sizeValue];
+                            jsonValue = @{@"width": LICSafeNumber(sz.width), @"height": LICSafeNumber(sz.height)};
+                            break;
+                        }
+                        case LookinAttrTypeCGRect: {
+                            CGRect r = [(NSValue *)value rectValue];
+                            jsonValue = @{@"x": LICSafeNumber(r.origin.x), @"y": LICSafeNumber(r.origin.y), @"width": LICSafeNumber(r.size.width), @"height": LICSafeNumber(r.size.height)};
+                            break;
+                        }
+                        case LookinAttrTypeUIEdgeInsets: {
+                            NSEdgeInsets insets = [(NSValue *)value edgeInsetsValue];
+                            jsonValue = @{@"top": LICSafeNumber(insets.top), @"left": LICSafeNumber(insets.left), @"bottom": LICSafeNumber(insets.bottom), @"right": LICSafeNumber(insets.right)};
+                            break;
+                        }
+                        case LookinAttrTypeUIColor: {
+                            // value is NSArray of 4 NSNumbers [R, G, B, A]
+                            NSArray *components = (NSArray *)value;
+                            if ([components isKindOfClass:[NSArray class]] && components.count == 4) {
+                                jsonValue = @{
+                                    @"r": LICSafeNumber([components[0] doubleValue]),
+                                    @"g": LICSafeNumber([components[1] doubleValue]),
+                                    @"b": LICSafeNumber([components[2] doubleValue]),
+                                    @"a": LICSafeNumber([components[3] doubleValue]),
+                                };
+                            }
+                            break;
+                        }
+                        case LookinAttrTypeJson:
+                            jsonValue = value; // NSString
+                            break;
+                        default:
+                            jsonValue = [NSNull null];
+                            break;
+                    }
+                }
+
+                [attrsArray addObject:@{
+                    @"id": attr.identifier ?: @"",
+                    @"type": @(attrType),
+                    @"value": jsonValue,
+                }];
+            }
+            [sectionsArray addObject:@{
+                @"section": section.identifier ?: @"",
+                @"attributes": attrsArray,
+            }];
+        }
+        [groupsArray addObject:@{
+            @"group": [group uniqueKey] ?: @"",
+            @"sections": sectionsArray,
+        }];
+    }
+    return groupsArray;
 }
 
 @end

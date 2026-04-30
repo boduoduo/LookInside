@@ -19,6 +19,7 @@ struct LookInside: ParsableCommand {
             Inspect.self,
             Hierarchy.self,
             Export.self,
+            Attrs.self,
         ],
         defaultSubcommand: List.self
     )
@@ -142,8 +143,22 @@ private struct Hierarchy: ParsableCommand {
     @Option(help: "Write the hierarchy to a file instead of stdout.")
     var output: String?
 
+    @Flag(name: .long, help: "Include the full attribute groups (text, color, font, etc.) for every node. Requires --format json.")
+    var withAttrs: Bool = false
+
+    mutating func validate() throws {
+        if withAttrs && format != .json {
+            throw CLIError("--with-attrs requires --format json.")
+        }
+    }
+
     mutating func run() throws {
-        let rendered = try CLIClient().hierarchy(target: options.target, format: format)
+        let rendered: String
+        if withAttrs {
+            rendered = try CLIClient().hierarchyWithAttrsJSON(target: options.target)
+        } else {
+            rendered = try CLIClient().hierarchy(target: options.target, format: format)
+        }
         if let output, !output.isEmpty {
             let destination = try FileDestination(path: output)
             try destination.write(rendered)
@@ -178,6 +193,22 @@ private struct Export: ParsableCommand {
     }
 }
 
+private struct Attrs: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Fetch all attributes for a specific view (text, color, font, corner radius, etc.)."
+    )
+
+    @OptionGroup var options: SharedTargetOptions
+
+    @Option(help: "Layer OID from `lookinside hierarchy`.")
+    var oid: UInt
+
+    mutating func run() throws {
+        let json = try CLIClient().allAttrGroupsJSON(target: options.target, oid: oid)
+        StandardPrinter.printLine(json)
+    }
+}
+
 private struct CLIClient {
     private let client = LICClient()
 
@@ -206,9 +237,25 @@ private struct CLIClient {
         }
     }
 
+    func hierarchyWithAttrsJSON(target: String) throws -> String {
+        do {
+            return try client.hierarchyWithAttrsJSON(forTargetID: target)
+        } catch {
+            throw error
+        }
+    }
+
     func export(target: String, to outputPath: String) throws -> URL {
         do {
             return try client.exportTargetID(target, outputPath: outputPath)
+        } catch {
+            throw error
+        }
+    }
+
+    func allAttrGroupsJSON(target: String, oid: UInt) throws -> String {
+        do {
+            return try client.allAttrGroupsJSON(forTargetID: target, layerOID: oid)
         } catch {
             throw error
         }

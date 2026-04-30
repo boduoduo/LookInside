@@ -6,9 +6,11 @@
 
 #import "LKS_TextDrawHook.h"
 #import "fishhook.h"
+#import "fishhook_chained.h"
 
 #import <CoreText/CoreText.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <mach-o/dyld.h>
 #import <pthread.h>
 #import <stdatomic.h>
 
@@ -236,6 +238,9 @@ static void hooked_CGContextSetRGBFillColor(CGContextRef ctx, CGFloat r, CGFloat
         return atomic_load(&succeeded);
     }
 
+    // Path A: legacy LC_DYLD_INFO bind tables (works on iOS Simulator and on
+    // older macOS binaries). fishhook iterates currently-loaded images and
+    // also registers a callback for future images.
     struct rebinding rebs[] = {
         { "CTFontDrawGlyphs",
           (void *)hooked_CTFontDrawGlyphs,
@@ -248,7 +253,39 @@ static void hooked_CGContextSetRGBFillColor(CGContextRef ctx, CGFloat r, CGFloat
           (void **)&orig_CGContextSetRGBFillColor },
     };
     int rc = rebind_symbols(rebs, sizeof(rebs)/sizeof(rebs[0]));
-    bool ok = (rc == 0) && orig_CTFontDrawGlyphs != NULL;
+
+    // Path B: LC_DYLD_CHAINED_FIXUPS (macOS 14+ / iOS 17+ Apple-Silicon
+    // builds). The legacy bind table is empty for these images, so we have to
+    // walk the chained-fixups payload and rewrite the matching slot ourselves.
+    // Resolve the originals via dlsym since fishhook's "replaced" out-pointer
+    // only fires when the legacy path matched.
+    if (!orig_CTFontDrawGlyphs) {
+        orig_CTFontDrawGlyphs = (void *)CTFontDrawGlyphs;
+    }
+    if (!orig_CGContextSetFillColorWithColor) {
+        orig_CGContextSetFillColorWithColor = (void *)CGContextSetFillColorWithColor;
+    }
+    if (!orig_CGContextSetRGBFillColor) {
+        orig_CGContextSetRGBFillColor = (void *)CGContextSetRGBFillColor;
+    }
+
+    struct lks_chained_rebinding chained_rebs[] = {
+        { "CTFontDrawGlyphs",
+          (void *)hooked_CTFontDrawGlyphs, NULL },
+        { "CGContextSetFillColorWithColor",
+          (void *)hooked_CGContextSetFillColorWithColor, NULL },
+        { "CGContextSetRGBFillColor",
+          (void *)hooked_CGContextSetRGBFillColor, NULL },
+    };
+    uint32_t image_count = _dyld_image_count();
+    for (uint32_t i = 0; i < image_count; i++) {
+        const struct mach_header *h = _dyld_get_image_header(i);
+        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+        lks_chained_rebind_image(h, slide, chained_rebs,
+                                 sizeof(chained_rebs)/sizeof(chained_rebs[0]));
+    }
+
+    bool ok = (rc == 0) || orig_CTFontDrawGlyphs != NULL;
     atomic_store(&succeeded, ok);
     return ok;
 }

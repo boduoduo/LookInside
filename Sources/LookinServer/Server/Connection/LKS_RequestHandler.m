@@ -298,56 +298,67 @@
         SEL makeViewDebugDataSel = @selector(makeViewDebugData);
         SEL accessibilityDebugSel = @selector(_accessibilitySwiftUIDebugData);
 
-        if ([resolvedObject respondsToSelector:makeViewDebugDataSel]) {
-            id raw = nil;
-            @try {
-                raw = ((id (*)(id, SEL))objc_msgSend)(resolvedObject, makeViewDebugDataSel);
-            } @catch (__unused id _) {}
-            if ([raw isKindOfClass:[NSData class]]) {
-                NSData *d = (NSData *)raw;
-                NSError *jsonErr = nil;
-                id parsed = [NSJSONSerialization JSONObjectWithData:d options:0 error:&jsonErr];
-                if (parsed) {
-                    response[@"viewDebugData"] = parsed;
-                    response[@"viewDebugDataFormat"] = @"json";
-                } else {
-                    // Fall back to plist; if neither parses, return raw bytes
-                    // as a hex-encoded string so callers can debug.
-                    NSError *plistErr = nil;
-                    id plist = [NSPropertyListSerialization propertyListWithData:d
-                                                                         options:NSPropertyListImmutable
-                                                                          format:NULL
-                                                                           error:&plistErr];
-                    if (plist) {
-                        response[@"viewDebugData"] = plist;
-                        response[@"viewDebugDataFormat"] = @"plist";
+        // SwiftUI debug data must be collected on the main thread — the
+        // selectors walk the live view graph, which requires CA/AppKit
+        // synchronisation. Dispatch synchronously from our request thread
+        // and bail with a clear error if the caller already happens to be
+        // on the main thread (re-entrancy would deadlock).
+        void (^collect)(void) = ^{
+            if ([resolvedObject respondsToSelector:makeViewDebugDataSel]) {
+                id raw = nil;
+                @try {
+                    raw = ((id (*)(id, SEL))objc_msgSend)(resolvedObject, makeViewDebugDataSel);
+                } @catch (__unused id _) {}
+                if ([raw isKindOfClass:[NSData class]]) {
+                    NSData *d = (NSData *)raw;
+                    NSError *jsonErr = nil;
+                    id parsed = [NSJSONSerialization JSONObjectWithData:d options:0 error:&jsonErr];
+                    if (parsed) {
+                        response[@"viewDebugData"] = parsed;
+                        response[@"viewDebugDataFormat"] = @"json";
                     } else {
-                        NSMutableString *hex = [NSMutableString stringWithCapacity:d.length * 2];
-                        const uint8_t *b = d.bytes;
-                        for (NSUInteger i = 0; i < MIN((NSUInteger)512, d.length); i++) {
-                            [hex appendFormat:@"%02x", b[i]];
+                        NSError *plistErr = nil;
+                        id plist = [NSPropertyListSerialization propertyListWithData:d
+                                                                             options:NSPropertyListImmutable
+                                                                              format:NULL
+                                                                               error:&plistErr];
+                        if (plist) {
+                            response[@"viewDebugData"] = plist;
+                            response[@"viewDebugDataFormat"] = @"plist";
+                        } else {
+                            NSMutableString *hex = [NSMutableString stringWithCapacity:d.length * 2];
+                            const uint8_t *b = d.bytes;
+                            for (NSUInteger i = 0; i < MIN((NSUInteger)512, d.length); i++) {
+                                [hex appendFormat:@"%02x", b[i]];
+                            }
+                            response[@"viewDebugData"] = hex;
+                            response[@"viewDebugDataFormat"] = @"hex";
+                            response[@"viewDebugDataLength"] = @(d.length);
                         }
-                        response[@"viewDebugData"] = hex;
-                        response[@"viewDebugDataFormat"] = @"hex";
-                        response[@"viewDebugDataLength"] = @(d.length);
                     }
+                } else if (raw) {
+                    response[@"viewDebugData"] = [raw description];
+                    response[@"viewDebugDataFormat"] = @"description";
                 }
-            } else if (raw) {
-                response[@"viewDebugData"] = [raw description];
-                response[@"viewDebugDataFormat"] = @"description";
             }
-        }
 
-        if ([resolvedObject respondsToSelector:accessibilityDebugSel]) {
-            id raw = nil;
-            @try {
-                raw = ((id (*)(id, SEL))objc_msgSend)(resolvedObject, accessibilityDebugSel);
-            } @catch (__unused id _) {}
-            if ([raw isKindOfClass:[NSArray class]] || [raw isKindOfClass:[NSDictionary class]]) {
-                response[@"accessibilityDebugData"] = raw;
-            } else if (raw) {
-                response[@"accessibilityDebugData"] = [raw description];
+            if ([resolvedObject respondsToSelector:accessibilityDebugSel]) {
+                id raw = nil;
+                @try {
+                    raw = ((id (*)(id, SEL))objc_msgSend)(resolvedObject, accessibilityDebugSel);
+                } @catch (__unused id _) {}
+                if ([raw isKindOfClass:[NSArray class]] || [raw isKindOfClass:[NSDictionary class]]) {
+                    response[@"accessibilityDebugData"] = raw;
+                } else if (raw) {
+                    response[@"accessibilityDebugData"] = [raw description];
+                }
             }
+        };
+
+        if ([NSThread isMainThread]) {
+            collect();
+        } else {
+            dispatch_sync(dispatch_get_main_queue(), collect);
         }
 
         [self _respondWithData:response requestType:requestType tag:tag];

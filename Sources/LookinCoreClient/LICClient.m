@@ -1146,7 +1146,7 @@ static id LICSafeNumber(double v) {
         return nil;
     }
 
-    LookinConnectionResponseAttachment *response = [session validatedRequestType:LookinRequestTypeSwiftUIDebugData data:@(oid) pingTimeout:2 requestTimeout:10 error:error];
+    LookinConnectionResponseAttachment *response = [session validatedRequestType:LookinRequestTypeSwiftUIDebugData data:@(oid) pingTimeout:2 requestTimeout:30 error:error];
     [session close];
     if (!response) {
         return nil;

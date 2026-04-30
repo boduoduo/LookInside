@@ -110,6 +110,83 @@ static CaptureCtx *_currentCtx(void) {
 static void (*orig_CTFontDrawGlyphs)(CTFontRef, const CGGlyph *, const CGPoint *, size_t, CGContextRef);
 static void (*orig_CGContextSetFillColorWithColor)(CGContextRef, CGColorRef);
 static void (*orig_CGContextSetRGBFillColor)(CGContextRef, CGFloat, CGFloat, CGFloat, CGFloat);
+static void (*orig_CTLineDraw)(CTLineRef, CGContextRef);
+static void (*orig_CTFrameDraw)(CTFrameRef, CGContextRef);
+static void (*orig_CTRunDraw)(CTRunRef, CGContextRef, CFRange);
+
+static NSArray<NSNumber *> *_rgbaFromColor(CGColorRef color);  // fwd
+
+static void _recordCTLine(CTLineRef line) {
+    CaptureCtx *cap = _currentCtx();
+    if (!cap || !line) return;
+    CFArrayRef runs = CTLineGetGlyphRuns(line);
+    if (!runs) return;
+    CFIndex nruns = CFArrayGetCount(runs);
+    for (CFIndex i = 0; i < nruns; i++) {
+        CTRunRef run = (CTRunRef)CFArrayGetValueAtIndex(runs, i);
+        CFIndex gc = CTRunGetGlyphCount(run);
+        if (gc <= 0 || gc > 4096) continue;
+
+        CFDictionaryRef attrs = CTRunGetAttributes(run);
+        CTFontRef font = attrs ? (CTFontRef)CFDictionaryGetValue(attrs, kCTFontAttributeName) : NULL;
+
+        LKS_TextDrawRecord *rec = [LKS_TextDrawRecord new];
+
+        if (font) {
+            CFStringRef fn = CTFontCopyFullName(font);
+            if (fn) { rec.fontName = (__bridge NSString *)fn; CFRelease(fn); }
+            CFStringRef ps = CTFontCopyPostScriptName(font);
+            if (ps) { rec.postScriptName = (__bridge NSString *)ps; CFRelease(ps); }
+            rec.fontSize = CTFontGetSize(font);
+
+            CTFontSymbolicTraits t = CTFontGetSymbolicTraits(font);
+            NSMutableArray *traitNames = [NSMutableArray array];
+            if (t & kCTFontTraitItalic) [traitNames addObject:@"italic"];
+            if (t & kCTFontTraitBold) [traitNames addObject:@"bold"];
+            if (t & kCTFontTraitMonoSpace) [traitNames addObject:@"monospace"];
+            rec.fontTraits = [traitNames componentsJoinedByString:@","];
+        }
+
+        // Glyphs
+        CGGlyph *glyphs = malloc(sizeof(CGGlyph) * gc);
+        CTRunGetGlyphs(run, CFRangeMake(0, 0), glyphs);
+        NSMutableArray *gArr = [NSMutableArray arrayWithCapacity:gc];
+        for (CFIndex k = 0; k < gc; k++) [gArr addObject:@(glyphs[k])];
+        rec.glyphs = gArr;
+        free(glyphs);
+        rec.text = nil; // CTRun knows the original characters; populate below.
+
+        // Try to get the actual characters from the run's string indices +
+        // any source string we can dig out of the run attributes. CTRun
+        // doesn't expose the original string directly, but we can walk
+        // CTRunGetStringIndices and use the font's character set as a
+        // best-effort cmap fallback.
+        if (font) {
+            NSDictionary<NSNumber *, NSString *> *gmap = _buildGlyphMap(font);
+            if (gmap.count) {
+                CGGlyph *gs = malloc(sizeof(CGGlyph) * gc);
+                CTRunGetGlyphs(run, CFRangeMake(0, 0), gs);
+                NSMutableString *txt = [NSMutableString string];
+                for (CFIndex k = 0; k < gc; k++) {
+                    NSString *ch = gmap[@(gs[k])];
+                    [txt appendString:ch ?: @"\uFFFD"];
+                }
+                rec.text = txt;
+                free(gs);
+            }
+        }
+
+        // Foreground colour, if attached to attributes (preferred over
+        // last-fill heuristic when present).
+        CGColorRef fg = attrs ? (CGColorRef)CFDictionaryGetValue(attrs, kCTForegroundColorAttributeName) : NULL;
+        if (fg) {
+            rec.fillRGBA = _rgbaFromColor(fg);
+        } else {
+            rec.fillRGBA = cap->lastFillRGBA;
+        }
+        [cap->records addObject:rec];
+    }
+}
 
 static NSArray<NSNumber *> *_rgbaFromColor(CGColorRef color) {
     if (!color) return nil;
@@ -223,6 +300,65 @@ static void hooked_CGContextSetRGBFillColor(CGContextRef ctx, CGFloat r, CGFloat
     orig_CGContextSetRGBFillColor(ctx, r, g, b, a);
 }
 
+static void hooked_CTLineDraw(CTLineRef line, CGContextRef ctx) {
+    _recordCTLine(line);
+    if (orig_CTLineDraw) orig_CTLineDraw(line, ctx);
+}
+
+static void hooked_CTFrameDraw(CTFrameRef frame, CGContextRef ctx) {
+    if (frame) {
+        CFArrayRef lines = CTFrameGetLines(frame);
+        if (lines) {
+            CFIndex n = CFArrayGetCount(lines);
+            for (CFIndex i = 0; i < n; i++) {
+                _recordCTLine((CTLineRef)CFArrayGetValueAtIndex(lines, i));
+            }
+        }
+    }
+    if (orig_CTFrameDraw) orig_CTFrameDraw(frame, ctx);
+}
+
+static void hooked_CTRunDraw(CTRunRef run, CGContextRef ctx, CFRange r) {
+    CaptureCtx *cap = _currentCtx();
+    if (cap && run) {
+        // Wrap the run in a temporary single-run line by directly recording it
+        CFIndex gc = CTRunGetGlyphCount(run);
+        if (gc > 0 && gc <= 4096) {
+            CFDictionaryRef attrs = CTRunGetAttributes(run);
+            CTFontRef font = attrs ? (CTFontRef)CFDictionaryGetValue(attrs, kCTFontAttributeName) : NULL;
+
+            LKS_TextDrawRecord *rec = [LKS_TextDrawRecord new];
+            if (font) {
+                CFStringRef fn = CTFontCopyFullName(font);
+                if (fn) { rec.fontName = (__bridge NSString *)fn; CFRelease(fn); }
+                CFStringRef ps = CTFontCopyPostScriptName(font);
+                if (ps) { rec.postScriptName = (__bridge NSString *)ps; CFRelease(ps); }
+                rec.fontSize = CTFontGetSize(font);
+
+                NSDictionary<NSNumber *, NSString *> *gmap = _buildGlyphMap(font);
+                if (gmap.count) {
+                    CGGlyph *gs = malloc(sizeof(CGGlyph) * gc);
+                    CTRunGetGlyphs(run, CFRangeMake(0, 0), gs);
+                    NSMutableString *txt = [NSMutableString string];
+                    NSMutableArray *gArr = [NSMutableArray array];
+                    for (CFIndex k = 0; k < gc; k++) {
+                        [gArr addObject:@(gs[k])];
+                        NSString *ch = gmap[@(gs[k])];
+                        [txt appendString:ch ?: @"\uFFFD"];
+                    }
+                    rec.text = txt;
+                    rec.glyphs = gArr;
+                    free(gs);
+                }
+            }
+            CGColorRef fg = attrs ? (CGColorRef)CFDictionaryGetValue(attrs, kCTForegroundColorAttributeName) : NULL;
+            rec.fillRGBA = fg ? _rgbaFromColor(fg) : cap->lastFillRGBA;
+            [cap->records addObject:rec];
+        }
+    }
+    if (orig_CTRunDraw) orig_CTRunDraw(run, ctx, r);
+}
+
 #pragma mark - Public API
 
 @implementation LKS_TextDrawRecord
@@ -251,6 +387,15 @@ static void hooked_CGContextSetRGBFillColor(CGContextRef ctx, CGFloat r, CGFloat
         { "CGContextSetRGBFillColor",
           (void *)hooked_CGContextSetRGBFillColor,
           (void **)&orig_CGContextSetRGBFillColor },
+        { "CTLineDraw",
+          (void *)hooked_CTLineDraw,
+          (void **)&orig_CTLineDraw },
+        { "CTFrameDraw",
+          (void *)hooked_CTFrameDraw,
+          (void **)&orig_CTFrameDraw },
+        { "CTRunDraw",
+          (void *)hooked_CTRunDraw,
+          (void **)&orig_CTRunDraw },
     };
     int rc = rebind_symbols(rebs, sizeof(rebs)/sizeof(rebs[0]));
 
@@ -268,6 +413,15 @@ static void hooked_CGContextSetRGBFillColor(CGContextRef ctx, CGFloat r, CGFloat
     if (!orig_CGContextSetRGBFillColor) {
         orig_CGContextSetRGBFillColor = (void *)CGContextSetRGBFillColor;
     }
+    if (!orig_CTLineDraw) {
+        orig_CTLineDraw = (void *)CTLineDraw;
+    }
+    if (!orig_CTFrameDraw) {
+        orig_CTFrameDraw = (void *)CTFrameDraw;
+    }
+    if (!orig_CTRunDraw) {
+        orig_CTRunDraw = (void *)CTRunDraw;
+    }
 
     struct lks_chained_rebinding chained_rebs[] = {
         { "CTFontDrawGlyphs",
@@ -276,6 +430,12 @@ static void hooked_CGContextSetRGBFillColor(CGContextRef ctx, CGFloat r, CGFloat
           (void *)hooked_CGContextSetFillColorWithColor, NULL },
         { "CGContextSetRGBFillColor",
           (void *)hooked_CGContextSetRGBFillColor, NULL },
+        { "CTLineDraw",
+          (void *)hooked_CTLineDraw, NULL },
+        { "CTFrameDraw",
+          (void *)hooked_CTFrameDraw, NULL },
+        { "CTRunDraw",
+          (void *)hooked_CTRunDraw, NULL },
     };
     uint32_t image_count = _dyld_image_count();
     for (uint32_t i = 0; i < image_count; i++) {

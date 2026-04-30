@@ -21,6 +21,7 @@
 #if TARGET_OS_OSX
 #import "LKS_TextDrawHook.h"
 #endif
+#import <objc/message.h>
 #import "LKS_InbuiltAttrModificationHandler.h"
 #import "LKS_CustomAttrModificationHandler.h"
 #import "LKS_AttrModificationPatchHandler.h"
@@ -58,6 +59,7 @@
             @(LookinRequestTypeModifyRecognizerEnable),
             @(LookinRequestTypeIntrospect),
             @(LookinRequestTypeTextSnapshot),
+            @(LookinRequestTypeSwiftUIDebugData),
             @(LookinPush_CanceHierarchyDetails),
         ]];
         _activeDetailHandlers = [NSMutableSet set];
@@ -268,6 +270,86 @@
             @"recordCount": @(out.count),
             @"records": out,
         };
+        [self _respondWithData:response requestType:requestType tag:tag];
+        return;
+#else
+        [self _respondWithError:LookinErr_Inner requestType:requestType tag:tag];
+        return;
+#endif
+    }
+
+    if (requestType == LookinRequestTypeSwiftUIDebugData) {
+#if TARGET_OS_OSX
+        unsigned long oid = [(NSNumber *)object unsignedLongValue];
+        NSObject *resolvedObject = [NSObject lks_objectWithOid:oid];
+        if (!resolvedObject) {
+            [self _respondWithError:LookinErr_ObjNotFound requestType:requestType tag:tag];
+            return;
+        }
+
+        NSMutableDictionary *response = [NSMutableDictionary dictionary];
+        response[@"className"] = NSStringFromClass([resolvedObject class]) ?: @"";
+
+        // SwiftUI exposes two undocumented selectors on every NSHostingView
+        // subclass that the Xcode View Debugger consumes. They are stable
+        // public(-ish) ObjC entry points (no fishhook needed) and return
+        // structured JSON / NSArray that already contain font / colour /
+        // text attributes for every Text/Image in the hosted SwiftUI tree.
+        SEL makeViewDebugDataSel = @selector(makeViewDebugData);
+        SEL accessibilityDebugSel = @selector(_accessibilitySwiftUIDebugData);
+
+        if ([resolvedObject respondsToSelector:makeViewDebugDataSel]) {
+            id raw = nil;
+            @try {
+                raw = ((id (*)(id, SEL))objc_msgSend)(resolvedObject, makeViewDebugDataSel);
+            } @catch (__unused id _) {}
+            if ([raw isKindOfClass:[NSData class]]) {
+                NSData *d = (NSData *)raw;
+                NSError *jsonErr = nil;
+                id parsed = [NSJSONSerialization JSONObjectWithData:d options:0 error:&jsonErr];
+                if (parsed) {
+                    response[@"viewDebugData"] = parsed;
+                    response[@"viewDebugDataFormat"] = @"json";
+                } else {
+                    // Fall back to plist; if neither parses, return raw bytes
+                    // as a hex-encoded string so callers can debug.
+                    NSError *plistErr = nil;
+                    id plist = [NSPropertyListSerialization propertyListWithData:d
+                                                                         options:NSPropertyListImmutable
+                                                                          format:NULL
+                                                                           error:&plistErr];
+                    if (plist) {
+                        response[@"viewDebugData"] = plist;
+                        response[@"viewDebugDataFormat"] = @"plist";
+                    } else {
+                        NSMutableString *hex = [NSMutableString stringWithCapacity:d.length * 2];
+                        const uint8_t *b = d.bytes;
+                        for (NSUInteger i = 0; i < MIN((NSUInteger)512, d.length); i++) {
+                            [hex appendFormat:@"%02x", b[i]];
+                        }
+                        response[@"viewDebugData"] = hex;
+                        response[@"viewDebugDataFormat"] = @"hex";
+                        response[@"viewDebugDataLength"] = @(d.length);
+                    }
+                }
+            } else if (raw) {
+                response[@"viewDebugData"] = [raw description];
+                response[@"viewDebugDataFormat"] = @"description";
+            }
+        }
+
+        if ([resolvedObject respondsToSelector:accessibilityDebugSel]) {
+            id raw = nil;
+            @try {
+                raw = ((id (*)(id, SEL))objc_msgSend)(resolvedObject, accessibilityDebugSel);
+            } @catch (__unused id _) {}
+            if ([raw isKindOfClass:[NSArray class]] || [raw isKindOfClass:[NSDictionary class]]) {
+                response[@"accessibilityDebugData"] = raw;
+            } else if (raw) {
+                response[@"accessibilityDebugData"] = [raw description];
+            }
+        }
+
         [self _respondWithData:response requestType:requestType tag:tag];
         return;
 #else

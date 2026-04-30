@@ -22,6 +22,7 @@ struct LookInside: ParsableCommand {
             Attrs.self,
             Ivars.self,
             TextSnapshot.self,
+            SwiftUIDebug.self,
         ],
         defaultSubcommand: List.self
     )
@@ -266,6 +267,37 @@ private struct TextSnapshot: ParsableCommand {
     }
 }
 
+private struct SwiftUIDebug: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "swiftui-debug",
+        abstract: "Dump SwiftUI viewDebugData (font / colour / text) for an NSHostingView.",
+        discussion: """
+        Calls -[NSHostingView makeViewDebugData] and
+        -[NSHostingView _accessibilitySwiftUIDebugData] on the OID's resolved
+        object — these are the same private-but-stable selectors Xcode's View
+        Debugger uses to surface SwiftUI semantics. The first returns a JSON
+        Data describing every view (Text/Image/Button/...) in the hosted
+        SwiftUI tree with the resolved font name, point size, fill colour and
+        string content; the second is the AX flavour with role/value/label
+        already broken out per element.
+
+        The target OID must resolve to an NSHostingView (or subclass). Use
+        `lookinside hierarchy` to find one — they show up in the tree as
+        `_TtGC7SwiftUI13NSHostingView...` classes with subrole AXHostingView.
+        """
+    )
+
+    @OptionGroup var options: SharedTargetOptions
+
+    @Option(help: "OID of an NSHostingView from `lookinside hierarchy`.")
+    var oid: UInt
+
+    mutating func run() throws {
+        let json = try CLIClient().swiftUIDebugJSON(target: options.target, oid: oid)
+        StandardPrinter.printLine(json)
+    }
+}
+
 private struct CLIClient {
     private let client = LICClient()
 
@@ -329,6 +361,14 @@ private struct CLIClient {
     func textSnapshotJSON(target: String, oid: UInt) throws -> String {
         do {
             return try client.textSnapshotJSON(forTargetID: target, oid: oid)
+        } catch {
+            throw error
+        }
+    }
+
+    func swiftUIDebugJSON(target: String, oid: UInt) throws -> String {
+        do {
+            return try client.swiftUIDebugJSON(forTargetID: target, oid: oid)
         } catch {
             throw error
         }

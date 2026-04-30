@@ -94,6 +94,11 @@ enum {
     /// 响应 NSDictionary 含 records: 数组，每条 record 是 font/size/color/text。
     LookinRequestTypeTextSnapshot = 231,
 
+    /// SwiftUI 视图调试数据（CLI `lookinside swiftui-debug` 使用）。请求体 @(oid)
+    /// 必须是 NSHostingView 实例。响应 NSDictionary 含 makeViewDebugData JSON +
+    /// _accessibilitySwiftUIDebugData 数组。
+    LookinRequestTypeSwiftUIDebugData = 232,
+
     /// 从 LookinServer 1.2.7 & Lookin 1.0.7 开始，该属性被废弃、不再使用
     LookinPush_BringForwardScreenshotTask = 303,
     

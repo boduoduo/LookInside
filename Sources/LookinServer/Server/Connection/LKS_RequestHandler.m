@@ -17,6 +17,7 @@
 #import "LookinStaticAsyncUpdateTask.h"
 #import "NSObject+LookinServer.h"
 #import "LKS_AttrGroupsMaker.h"
+#import "LKS_IntrospectionHandler.h"
 #import "LKS_InbuiltAttrModificationHandler.h"
 #import "LKS_CustomAttrModificationHandler.h"
 #import "LKS_AttrModificationPatchHandler.h"
@@ -52,6 +53,7 @@
             @(LookinRequestTypeInvokeMethod),
             @(LookinRequestTypeFetchImageViewImage),
             @(LookinRequestTypeModifyRecognizerEnable),
+            @(LookinRequestTypeIntrospect),
             @(LookinPush_CanceHierarchyDetails),
         ]];
         _activeDetailHandlers = [NSMutableSet set];
@@ -174,6 +176,19 @@
             return;
         }
         [self _respondWithData:groups requestType:requestType tag:tag];
+        return;
+    }
+
+    if (requestType == LookinRequestTypeIntrospect) {
+        unsigned long oid = 0;
+        if ([object isKindOfClass:[NSNumber class]]) {
+            oid = [(NSNumber *)object unsignedLongValue];
+        } else if ([object isKindOfClass:[NSDictionary class]]) {
+            oid = [[(NSDictionary *)object objectForKey:@"oid"] unsignedLongValue];
+        }
+        NSObject *resolvedObject = [NSObject lks_objectWithOid:oid];
+        NSDictionary *info = [LKS_IntrospectionHandler introspectObject:resolvedObject];
+        [self _respondWithData:info requestType:requestType tag:tag];
         return;
     }
 

@@ -20,6 +20,7 @@ struct LookInside: ParsableCommand {
             Hierarchy.self,
             Export.self,
             Attrs.self,
+            Ivars.self,
         ],
         defaultSubcommand: List.self
     )
@@ -209,6 +210,27 @@ private struct Attrs: ParsableCommand {
     }
 }
 
+private struct Ivars: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Dump runtime ivars, AppKit quick-look (font/text/color), and AX info for an object.",
+        discussion: """
+        Useful for probing SwiftUI bridged views that don't expose attributes
+        through the regular `attrs` subcommand. Works with any OID returned by
+        `lookinside hierarchy`, including NSView subclasses.
+        """
+    )
+
+    @OptionGroup var options: SharedTargetOptions
+
+    @Option(help: "Object OID from `lookinside hierarchy`.")
+    var oid: UInt
+
+    mutating func run() throws {
+        let json = try CLIClient().introspectJSON(target: options.target, oid: oid)
+        StandardPrinter.printLine(json)
+    }
+}
+
 private struct CLIClient {
     private let client = LICClient()
 
@@ -256,6 +278,14 @@ private struct CLIClient {
     func allAttrGroupsJSON(target: String, oid: UInt) throws -> String {
         do {
             return try client.allAttrGroupsJSON(forTargetID: target, layerOID: oid)
+        } catch {
+            throw error
+        }
+    }
+
+    func introspectJSON(target: String, oid: UInt) throws -> String {
+        do {
+            return try client.introspectJSON(forTargetID: target, oid: oid)
         } catch {
             throw error
         }

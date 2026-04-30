@@ -86,6 +86,10 @@ enum {
     /// License 握手：Host → Server 提交签名 + 中间证书供校验
     LookinRequestTypeLicenseVerify = 221,
 
+    /// 通用对象探针（CLI `lookinside ivars` 使用）。请求体 @{ @"oid": @(oid) }，
+    /// 响应 NSDictionary 含 className / superclasses / ivars / accessibility。
+    LookinRequestTypeIntrospect = 230,
+
     /// 从 LookinServer 1.2.7 & Lookin 1.0.7 开始，该属性被废弃、不再使用
     LookinPush_BringForwardScreenshotTask = 303,
     

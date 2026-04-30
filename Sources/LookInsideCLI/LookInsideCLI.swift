@@ -21,6 +21,7 @@ struct LookInside: ParsableCommand {
             Export.self,
             Attrs.self,
             Ivars.self,
+            TextSnapshot.self,
         ],
         defaultSubcommand: List.self
     )
@@ -231,6 +232,40 @@ private struct Ivars: ParsableCommand {
     }
 }
 
+private struct TextSnapshot: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "text-snapshot",
+        abstract: "Capture the SwiftUI text drawn by a CALayer (font / size / color / text content).",
+        discussion: """
+        SwiftUI renders Text into private _CGDrawingLayer instances whose
+        `content` is an opaque drawing closure, so the regular `attrs` and
+        `ivars` subcommands can't see the resolved font, point size, fill
+        colour or glyphs.
+
+        text-snapshot installs CoreText / CoreGraphics interposers via
+        fishhook the first time it runs, then drives the target layer's
+        drawInContext: against an off-screen bitmap context. The hooks
+        record every CTFontDrawGlyphs / CGContextSetFillColor* call made
+        during that one draw pass and return them as JSON, including a
+        best-effort glyph→character reversal that recovers the visible
+        text.
+
+        The target OID must resolve to a CALayer (typically a
+        SwiftUI._CGDrawingLayer or its subclass).
+        """
+    )
+
+    @OptionGroup var options: SharedTargetOptions
+
+    @Option(help: "Layer OID from `lookinside hierarchy`. Must be a CALayer.")
+    var oid: UInt
+
+    mutating func run() throws {
+        let json = try CLIClient().textSnapshotJSON(target: options.target, oid: oid)
+        StandardPrinter.printLine(json)
+    }
+}
+
 private struct CLIClient {
     private let client = LICClient()
 
@@ -286,6 +321,14 @@ private struct CLIClient {
     func introspectJSON(target: String, oid: UInt) throws -> String {
         do {
             return try client.introspectJSON(forTargetID: target, oid: oid)
+        } catch {
+            throw error
+        }
+    }
+
+    func textSnapshotJSON(target: String, oid: UInt) throws -> String {
+        do {
+            return try client.textSnapshotJSON(forTargetID: target, oid: oid)
         } catch {
             throw error
         }

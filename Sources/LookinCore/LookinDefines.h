@@ -90,6 +90,10 @@ enum {
     /// 响应 NSDictionary 含 className / superclasses / ivars / accessibility。
     LookinRequestTypeIntrospect = 230,
 
+    /// SwiftUI 文字快照（CLI `lookinside text-snapshot` 使用）。请求体 @(oid)，
+    /// 响应 NSDictionary 含 records: 数组，每条 record 是 font/size/color/text。
+    LookinRequestTypeTextSnapshot = 231,
+
     /// 从 LookinServer 1.2.7 & Lookin 1.0.7 开始，该属性被废弃、不再使用
     LookinPush_BringForwardScreenshotTask = 303,
     

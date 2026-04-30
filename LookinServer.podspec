@@ -36,7 +36,7 @@ Pod::Spec.new do |s|
     'Sources/LookinCore/**/*.{h,m,mm}',
     'Sources/LookinServerSwift/**/*.{swift}',
     'Sources/LookinServer/include/*.h',
-    'Sources/LookinServer/Server/**/*.{h,m,mm}',
+    'Sources/LookinServer/Server/**/*.{c,h,m,mm}',
   ]
 
   s.public_header_files = [

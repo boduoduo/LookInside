@@ -18,6 +18,9 @@
 #import "NSObject+LookinServer.h"
 #import "LKS_AttrGroupsMaker.h"
 #import "LKS_IntrospectionHandler.h"
+#if TARGET_OS_OSX
+#import "LKS_TextDrawHook.h"
+#endif
 #import "LKS_InbuiltAttrModificationHandler.h"
 #import "LKS_CustomAttrModificationHandler.h"
 #import "LKS_AttrModificationPatchHandler.h"
@@ -54,6 +57,7 @@
             @(LookinRequestTypeFetchImageViewImage),
             @(LookinRequestTypeModifyRecognizerEnable),
             @(LookinRequestTypeIntrospect),
+            @(LookinRequestTypeTextSnapshot),
             @(LookinPush_CanceHierarchyDetails),
         ]];
         _activeDetailHandlers = [NSMutableSet set];
@@ -190,6 +194,59 @@
         NSDictionary *info = [LKS_IntrospectionHandler introspectObject:resolvedObject];
         [self _respondWithData:info requestType:requestType tag:tag];
         return;
+    }
+
+    if (requestType == LookinRequestTypeTextSnapshot) {
+#if TARGET_OS_OSX
+        unsigned long oid = [(NSNumber *)object unsignedLongValue];
+        NSObject *resolvedObject = [NSObject lks_objectWithOid:oid];
+        if (![resolvedObject isKindOfClass:[CALayer class]]) {
+            [self _respondWithError:LookinErr_ObjNotFound requestType:requestType tag:tag];
+            return;
+        }
+        CALayer *layer = (CALayer *)resolvedObject;
+        CGFloat w = MAX(layer.bounds.size.width, 1);
+        CGFloat h = MAX(layer.bounds.size.height, 1);
+
+        // We render into a throw-away offscreen bitmap so the host's actual
+        // CALayer presentation isn't disturbed; the hook only records calls
+        // made into *this* context (in fact, into any context — the TLS
+        // capture flag scopes it correctly regardless).
+        CGColorSpaceRef cs = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+        CGContextRef ctx = CGBitmapContextCreate(NULL, (size_t)w, (size_t)h, 8, 0, cs,
+                                                 (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+        CGColorSpaceRelease(cs);
+
+        NSArray<LKS_TextDrawRecord *> *records =
+            [LKS_TextDrawHook snapshotWithBlock:^{
+                if (ctx) [layer drawInContext:ctx];
+            }];
+
+        if (ctx) CGContextRelease(ctx);
+
+        NSMutableArray *out = [NSMutableArray array];
+        for (LKS_TextDrawRecord *r in records) {
+            NSMutableDictionary *d = [NSMutableDictionary dictionary];
+            if (r.fontName)       d[@"fontName"] = r.fontName;
+            if (r.postScriptName) d[@"postScriptName"] = r.postScriptName;
+            d[@"fontSize"] = @(r.fontSize);
+            if (r.fontTraits.length) d[@"fontTraits"] = r.fontTraits;
+            if (r.text)           d[@"text"] = r.text;
+            if (r.glyphs.count)   d[@"glyphCount"] = @(r.glyphs.count);
+            if (r.fillRGBA.count) d[@"fillRGBA"] = r.fillRGBA;
+            [out addObject:d];
+        }
+        NSDictionary *response = @{
+            @"hooksInstalled": @([LKS_TextDrawHook installHooks]),
+            @"recordCount": @(out.count),
+            @"records": out,
+        };
+        [self _respondWithData:response requestType:requestType tag:tag];
+        return;
+#else
+        [self _respondWithError:LookinErr_Inner requestType:requestType tag:tag];
+        return;
+#endif
     }
 
     if (requestType == LookinRequestTypeAllSelectorNames) {

@@ -1102,6 +1102,39 @@ static id LICSafeNumber(double v) {
     return [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
 }
 
+- (nullable NSString *)textSnapshotJSONForTargetID:(NSString *)targetID oid:(NSUInteger)oid error:(NSError **)error {
+    LICDiscoveredTarget *target = [self resolveTargetID:targetID error:error];
+    if (!target) {
+        return nil;
+    }
+
+    LICChannelSession *session = [self openSessionForTarget:target error:error];
+    if (!session) {
+        return nil;
+    }
+
+    LookinConnectionResponseAttachment *response = [session validatedRequestType:LookinRequestTypeTextSnapshot data:@(oid) pingTimeout:2 requestTimeout:10 error:error];
+    [session close];
+    if (!response) {
+        return nil;
+    }
+
+    if (![response.data isKindOfClass:[NSDictionary class]]) {
+        if (error) {
+            *error = [NSError errorWithDomain:LICErrorDomain code:LICErrorCodeInvalidResponse userInfo:@{NSLocalizedDescriptionKey:@"TextSnapshot payload was not an NSDictionary."}];
+        }
+        return nil;
+    }
+
+    // The text-snapshot payload contains NSValue<CGPoint> entries via positions[]
+    // — but we pre-strip those server-side. Anything still here is JSON-friendly.
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:response.data options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:error];
+    if (!jsonData) {
+        return nil;
+    }
+    return [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+}
+
 - (NSArray *)attrGroupsJSONArrayFromGroups:(NSArray<LookinAttributesGroup *> *)groups {
     NSMutableArray *groupsArray = [NSMutableArray array];
     for (LookinAttributesGroup *group in groups) {

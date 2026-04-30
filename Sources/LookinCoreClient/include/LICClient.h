@@ -12,6 +12,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSURL *)exportTargetID:(NSString *)targetID outputPath:(NSString *)outputPath error:(NSError **)error;
 - (nullable NSString *)allAttrGroupsJSONForTargetID:(NSString *)targetID layerOID:(NSUInteger)oid error:(NSError **)error;
 - (nullable NSString *)introspectJSONForTargetID:(NSString *)targetID oid:(NSUInteger)oid error:(NSError **)error;
+- (nullable NSString *)textSnapshotJSONForTargetID:(NSString *)targetID oid:(NSUInteger)oid error:(NSError **)error;
 
 @end
 

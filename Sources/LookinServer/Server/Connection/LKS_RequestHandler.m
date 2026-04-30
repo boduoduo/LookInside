@@ -219,7 +219,24 @@
 
         NSArray<LKS_TextDrawRecord *> *records =
             [LKS_TextDrawHook snapshotWithBlock:^{
-                if (ctx) [layer drawInContext:ctx];
+                if (!ctx) return;
+                // SwiftUI's _CGDrawingLayer renders through CALayer.display
+                // (which internally drives its closure with its *own* CGContext)
+                // rather than the legacy drawInContext: path. We try several
+                // entry points and capture whichever one actually emits draws:
+                //   1. setNeedsDisplay + display — flushes the layer's content
+                //      via SwiftUI's render pipeline.
+                //   2. drawInContext: into our throw-away bitmap — covers any
+                //      layer subclass that overrides the legacy entry point.
+                //   3. renderInContext: — last-ditch CALayer-level fallback.
+                [layer setNeedsDisplay];
+                if ([layer respondsToSelector:@selector(displayIfNeeded)]) {
+                    [layer displayIfNeeded];
+                } else {
+                    [layer display];
+                }
+                [layer drawInContext:ctx];
+                [layer renderInContext:ctx];
             }];
 
         if (ctx) CGContextRelease(ctx);

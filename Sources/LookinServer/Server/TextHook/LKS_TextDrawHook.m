@@ -10,6 +10,7 @@
 
 #import <CoreText/CoreText.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <pthread.h>
 #import <stdatomic.h>
@@ -113,6 +114,19 @@ static void (*orig_CGContextSetRGBFillColor)(CGContextRef, CGFloat, CGFloat, CGF
 static void (*orig_CTLineDraw)(CTLineRef, CGContextRef);
 static void (*orig_CTFrameDraw)(CTFrameRef, CGContextRef);
 static void (*orig_CTRunDraw)(CTRunRef, CGContextRef, CFRange);
+
+// SwiftUI on macOS 14+ renders text through these CT entry points instead of
+// the public CTFontDrawGlyphs / CTLineDraw paths. They share the same
+// (font, glyphs, positions, count, ctx) signature for the most part, so we
+// can capture them with the same trampoline shape as CTFontDrawGlyphs.
+typedef void (*CTFontDrawGlyphsAtPositions_t)(CTFontRef, const CGGlyph *, const CGPoint *, size_t, CGContextRef);
+typedef void (*CTFontDrawGlyphsWithAdvances_t)(CTFontRef, const CGGlyph *, const CGSize *, size_t, CGContextRef);
+typedef void (*CTRunDrawWithAttributeOverrides_t)(CTRunRef, CGContextRef, CFRange, CFDictionaryRef);
+typedef void (*CTLineDrawWithAttributeOverrides_t)(CTLineRef, CGContextRef, CFDictionaryRef);
+static CTFontDrawGlyphsAtPositions_t orig_CTFontDrawGlyphsAtPositions;
+static CTFontDrawGlyphsWithAdvances_t orig_CTFontDrawGlyphsWithAdvances;
+static CTRunDrawWithAttributeOverrides_t orig_CTRunDrawWithAttributeOverrides;
+static CTLineDrawWithAttributeOverrides_t orig_CTLineDrawWithAttributeOverrides;
 
 static NSArray<NSNumber *> *_rgbaFromColor(CGColorRef color);  // fwd
 
@@ -359,6 +373,128 @@ static void hooked_CTRunDraw(CTRunRef run, CGContextRef ctx, CFRange r) {
     if (orig_CTRunDraw) orig_CTRunDraw(run, ctx, r);
 }
 
+// SwiftUI 14+ entry points.
+static void hooked_CTFontDrawGlyphsAtPositions(CTFontRef font, const CGGlyph *g,
+                                               const CGPoint *p, size_t n,
+                                               CGContextRef ctx) {
+    // Identical capture path as CTFontDrawGlyphs.
+    if (_currentCtx() && font && n > 0 && n <= 4096) {
+        // Hand off to the existing trampoline by faking the public call shape.
+        // We don't want to duplicate the recording code, so we synthesize a
+        // CTFontDrawGlyphs invocation against our hook (which does both the
+        // capture and the forward to the real symbol).
+        // BUT the real CTFontDrawGlyphs probably calls AtPositions internally,
+        // which would recurse. Capture inline instead and forward to original.
+        CaptureCtx *cap = _currentCtx();
+        LKS_TextDrawRecord *rec = [LKS_TextDrawRecord new];
+        CFStringRef fn = CTFontCopyFullName(font);
+        if (fn) { rec.fontName = (__bridge NSString *)fn; CFRelease(fn); }
+        CFStringRef ps = CTFontCopyPostScriptName(font);
+        if (ps) { rec.postScriptName = (__bridge NSString *)ps; CFRelease(ps); }
+        rec.fontSize = CTFontGetSize(font);
+
+        NSDictionary<NSNumber *, NSString *> *gmap = _buildGlyphMap(font);
+        if (gmap.count) {
+            NSMutableString *txt = [NSMutableString string];
+            NSMutableArray *gArr = [NSMutableArray arrayWithCapacity:n];
+            for (size_t i = 0; i < n; i++) {
+                [gArr addObject:@(g[i])];
+                NSString *ch = gmap[@(g[i])];
+                [txt appendString:ch ?: @"\uFFFD"];
+            }
+            rec.text = txt;
+            rec.glyphs = gArr;
+        }
+        rec.fillRGBA = cap->lastFillRGBA;
+        [cap->records addObject:rec];
+    }
+    if (orig_CTFontDrawGlyphsAtPositions) {
+        orig_CTFontDrawGlyphsAtPositions(font, g, p, n, ctx);
+    }
+}
+
+static void hooked_CTFontDrawGlyphsWithAdvances(CTFontRef font, const CGGlyph *g,
+                                                const CGSize *adv, size_t n,
+                                                CGContextRef ctx) {
+    if (_currentCtx() && font && n > 0 && n <= 4096) {
+        CaptureCtx *cap = _currentCtx();
+        LKS_TextDrawRecord *rec = [LKS_TextDrawRecord new];
+        CFStringRef fn = CTFontCopyFullName(font);
+        if (fn) { rec.fontName = (__bridge NSString *)fn; CFRelease(fn); }
+        rec.fontSize = CTFontGetSize(font);
+        NSDictionary<NSNumber *, NSString *> *gmap = _buildGlyphMap(font);
+        if (gmap.count) {
+            NSMutableString *txt = [NSMutableString string];
+            NSMutableArray *gArr = [NSMutableArray arrayWithCapacity:n];
+            for (size_t i = 0; i < n; i++) {
+                [gArr addObject:@(g[i])];
+                NSString *ch = gmap[@(g[i])];
+                [txt appendString:ch ?: @"\uFFFD"];
+            }
+            rec.text = txt;
+            rec.glyphs = gArr;
+        }
+        rec.fillRGBA = cap->lastFillRGBA;
+        [cap->records addObject:rec];
+    }
+    if (orig_CTFontDrawGlyphsWithAdvances) {
+        orig_CTFontDrawGlyphsWithAdvances(font, g, adv, n, ctx);
+    }
+}
+
+static void hooked_CTRunDrawWithAttributeOverrides(CTRunRef run, CGContextRef ctx,
+                                                   CFRange r, CFDictionaryRef overrides) {
+    // Same capture as CTRunDraw, with attribute overrides taking precedence
+    // for foreground colour if SwiftUI used them to swap colour mid-render.
+    CaptureCtx *cap = _currentCtx();
+    if (cap && run) {
+        CFIndex gc = CTRunGetGlyphCount(run);
+        if (gc > 0 && gc <= 4096) {
+            CFDictionaryRef attrs = CTRunGetAttributes(run);
+            CTFontRef font = attrs ? (CTFontRef)CFDictionaryGetValue(attrs, kCTFontAttributeName) : NULL;
+            CGColorRef fg = NULL;
+            if (overrides) fg = (CGColorRef)CFDictionaryGetValue(overrides, kCTForegroundColorAttributeName);
+            if (!fg && attrs) fg = (CGColorRef)CFDictionaryGetValue(attrs, kCTForegroundColorAttributeName);
+
+            LKS_TextDrawRecord *rec = [LKS_TextDrawRecord new];
+            if (font) {
+                CFStringRef fn = CTFontCopyFullName(font);
+                if (fn) { rec.fontName = (__bridge NSString *)fn; CFRelease(fn); }
+                rec.fontSize = CTFontGetSize(font);
+
+                NSDictionary<NSNumber *, NSString *> *gmap = _buildGlyphMap(font);
+                if (gmap.count) {
+                    CGGlyph *gs = malloc(sizeof(CGGlyph) * gc);
+                    CTRunGetGlyphs(run, CFRangeMake(0, 0), gs);
+                    NSMutableString *txt = [NSMutableString string];
+                    NSMutableArray *gArr = [NSMutableArray array];
+                    for (CFIndex k = 0; k < gc; k++) {
+                        [gArr addObject:@(gs[k])];
+                        NSString *ch = gmap[@(gs[k])];
+                        [txt appendString:ch ?: @"\uFFFD"];
+                    }
+                    rec.text = txt;
+                    rec.glyphs = gArr;
+                    free(gs);
+                }
+            }
+            rec.fillRGBA = fg ? _rgbaFromColor(fg) : cap->lastFillRGBA;
+            [cap->records addObject:rec];
+        }
+    }
+    if (orig_CTRunDrawWithAttributeOverrides) {
+        orig_CTRunDrawWithAttributeOverrides(run, ctx, r, overrides);
+    }
+}
+
+static void hooked_CTLineDrawWithAttributeOverrides(CTLineRef line, CGContextRef ctx,
+                                                    CFDictionaryRef overrides) {
+    _recordCTLine(line);
+    if (orig_CTLineDrawWithAttributeOverrides) {
+        orig_CTLineDrawWithAttributeOverrides(line, ctx, overrides);
+    }
+}
+
 #pragma mark - Public API
 
 @implementation LKS_TextDrawRecord
@@ -378,24 +514,16 @@ static void hooked_CTRunDraw(CTRunRef run, CGContextRef ctx, CFRange r) {
     // older macOS binaries). fishhook iterates currently-loaded images and
     // also registers a callback for future images.
     struct rebinding rebs[] = {
-        { "CTFontDrawGlyphs",
-          (void *)hooked_CTFontDrawGlyphs,
-          (void **)&orig_CTFontDrawGlyphs },
-        { "CGContextSetFillColorWithColor",
-          (void *)hooked_CGContextSetFillColorWithColor,
-          (void **)&orig_CGContextSetFillColorWithColor },
-        { "CGContextSetRGBFillColor",
-          (void *)hooked_CGContextSetRGBFillColor,
-          (void **)&orig_CGContextSetRGBFillColor },
-        { "CTLineDraw",
-          (void *)hooked_CTLineDraw,
-          (void **)&orig_CTLineDraw },
-        { "CTFrameDraw",
-          (void *)hooked_CTFrameDraw,
-          (void **)&orig_CTFrameDraw },
-        { "CTRunDraw",
-          (void *)hooked_CTRunDraw,
-          (void **)&orig_CTRunDraw },
+        { "CTFontDrawGlyphs",                  (void *)hooked_CTFontDrawGlyphs,                  (void **)&orig_CTFontDrawGlyphs },
+        { "CTFontDrawGlyphsAtPositions",       (void *)hooked_CTFontDrawGlyphsAtPositions,       (void **)&orig_CTFontDrawGlyphsAtPositions },
+        { "CTFontDrawGlyphsWithAdvances",      (void *)hooked_CTFontDrawGlyphsWithAdvances,      (void **)&orig_CTFontDrawGlyphsWithAdvances },
+        { "CGContextSetFillColorWithColor",    (void *)hooked_CGContextSetFillColorWithColor,    (void **)&orig_CGContextSetFillColorWithColor },
+        { "CGContextSetRGBFillColor",          (void *)hooked_CGContextSetRGBFillColor,          (void **)&orig_CGContextSetRGBFillColor },
+        { "CTLineDraw",                        (void *)hooked_CTLineDraw,                        (void **)&orig_CTLineDraw },
+        { "CTLineDrawWithAttributeOverrides",  (void *)hooked_CTLineDrawWithAttributeOverrides,  (void **)&orig_CTLineDrawWithAttributeOverrides },
+        { "CTFrameDraw",                       (void *)hooked_CTFrameDraw,                       (void **)&orig_CTFrameDraw },
+        { "CTRunDraw",                         (void *)hooked_CTRunDraw,                         (void **)&orig_CTRunDraw },
+        { "CTRunDrawWithAttributeOverrides",   (void *)hooked_CTRunDrawWithAttributeOverrides,   (void **)&orig_CTRunDrawWithAttributeOverrides },
     };
     int rc = rebind_symbols(rebs, sizeof(rebs)/sizeof(rebs[0]));
 
@@ -422,20 +550,32 @@ static void hooked_CTRunDraw(CTRunRef run, CGContextRef ctx, CFRange r) {
     if (!orig_CTRunDraw) {
         orig_CTRunDraw = (void *)CTRunDraw;
     }
+    // For the symbols that aren't in the SDK header, fall back to dlsym so we
+    // can still forward calls if our chained-fixups path landed.
+    if (!orig_CTFontDrawGlyphsAtPositions) {
+        orig_CTFontDrawGlyphsAtPositions = dlsym(RTLD_DEFAULT, "CTFontDrawGlyphsAtPositions");
+    }
+    if (!orig_CTFontDrawGlyphsWithAdvances) {
+        orig_CTFontDrawGlyphsWithAdvances = dlsym(RTLD_DEFAULT, "CTFontDrawGlyphsWithAdvances");
+    }
+    if (!orig_CTRunDrawWithAttributeOverrides) {
+        orig_CTRunDrawWithAttributeOverrides = dlsym(RTLD_DEFAULT, "CTRunDrawWithAttributeOverrides");
+    }
+    if (!orig_CTLineDrawWithAttributeOverrides) {
+        orig_CTLineDrawWithAttributeOverrides = dlsym(RTLD_DEFAULT, "CTLineDrawWithAttributeOverrides");
+    }
 
     struct lks_chained_rebinding chained_rebs[] = {
-        { "CTFontDrawGlyphs",
-          (void *)hooked_CTFontDrawGlyphs, NULL },
-        { "CGContextSetFillColorWithColor",
-          (void *)hooked_CGContextSetFillColorWithColor, NULL },
-        { "CGContextSetRGBFillColor",
-          (void *)hooked_CGContextSetRGBFillColor, NULL },
-        { "CTLineDraw",
-          (void *)hooked_CTLineDraw, NULL },
-        { "CTFrameDraw",
-          (void *)hooked_CTFrameDraw, NULL },
-        { "CTRunDraw",
-          (void *)hooked_CTRunDraw, NULL },
+        { "CTFontDrawGlyphs",                  (void *)hooked_CTFontDrawGlyphs, NULL },
+        { "CTFontDrawGlyphsAtPositions",       (void *)hooked_CTFontDrawGlyphsAtPositions, NULL },
+        { "CTFontDrawGlyphsWithAdvances",      (void *)hooked_CTFontDrawGlyphsWithAdvances, NULL },
+        { "CGContextSetFillColorWithColor",    (void *)hooked_CGContextSetFillColorWithColor, NULL },
+        { "CGContextSetRGBFillColor",          (void *)hooked_CGContextSetRGBFillColor, NULL },
+        { "CTLineDraw",                        (void *)hooked_CTLineDraw, NULL },
+        { "CTLineDrawWithAttributeOverrides",  (void *)hooked_CTLineDrawWithAttributeOverrides, NULL },
+        { "CTFrameDraw",                       (void *)hooked_CTFrameDraw, NULL },
+        { "CTRunDraw",                         (void *)hooked_CTRunDraw, NULL },
+        { "CTRunDrawWithAttributeOverrides",   (void *)hooked_CTRunDrawWithAttributeOverrides, NULL },
     };
     uint32_t image_count = _dyld_image_count();
     for (uint32_t i = 0; i < image_count; i++) {

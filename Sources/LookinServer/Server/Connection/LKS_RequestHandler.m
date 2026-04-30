@@ -220,15 +220,23 @@
         NSArray<LKS_TextDrawRecord *> *records =
             [LKS_TextDrawHook snapshotWithBlock:^{
                 if (!ctx) return;
-                // SwiftUI's _CGDrawingLayer renders through CALayer.display
-                // (which internally drives its closure with its *own* CGContext)
-                // rather than the legacy drawInContext: path. We try several
-                // entry points and capture whichever one actually emits draws:
-                //   1. setNeedsDisplay + display — flushes the layer's content
-                //      via SwiftUI's render pipeline.
-                //   2. drawInContext: into our throw-away bitmap — covers any
-                //      layer subclass that overrides the legacy entry point.
-                //   3. renderInContext: — last-ditch CALayer-level fallback.
+                // First: a self-test draw using a known font + glyphs. This
+                // proves the hook is wired up regardless of whether SwiftUI
+                // hits CTFontDrawGlyphs through some private alternative.
+                // We render at offscreen origin so it never touches the host.
+                CTFontRef probeFont = CTFontCreateWithName(CFSTR("Helvetica"), 12, NULL);
+                if (probeFont) {
+                    UniChar probeChars[] = { 'L', 'K', 'S' };
+                    CGGlyph probeGlyphs[3] = {0};
+                    CTFontGetGlyphsForCharacters(probeFont, probeChars, probeGlyphs, 3);
+                    CGPoint probePts[3] = { {0,0}, {6,0}, {12,0} };
+                    CTFontDrawGlyphs(probeFont, probeGlyphs, probePts, 3, ctx);
+                    CFRelease(probeFont);
+                }
+
+                // Then drive the real layer through every documented entry
+                // point. SwiftUI _CGDrawingLayer caches its contents so we
+                // also force a redisplay.
                 [layer setNeedsDisplay];
                 if ([layer respondsToSelector:@selector(displayIfNeeded)]) {
                     [layer displayIfNeeded];

@@ -223,6 +223,18 @@ typedef NS_ENUM(NSInteger, LICErrorCode) {
     }
 
     NSData *data = [NSData dataWithContentsOfDispatchData:payload.dispatchData];
+
+    // DIAGNOSTIC: dump every incoming frame to /tmp so we can offline-repro
+    // the macOS 26 NSKeyedUnarchiver SIGBUS on the exact bytes Filmly sends.
+    // Conditional on env var so we don't pollute disk in normal use.
+    if (getenv("LOOKINSIDE_DEBUG_DUMP")) {
+        NSString *path = [NSString stringWithFormat:@"/tmp/lks-frame-%u-%u-%@.bin",
+                          type, tag, [[NSUUID UUID] UUIDString]];
+        [data writeToFile:path atomically:NO];
+        fprintf(stderr, "[lookinside] dumped frame type=%u tag=%u %lu bytes -> %s\n",
+                type, tag, (unsigned long)data.length, path.UTF8String);
+    }
+
     NSError *unarchiveError = nil;
     NSObject *object = [NSKeyedUnarchiver unarchivedObjectOfClass:[NSObject class] fromData:data error:&unarchiveError];
     if (unarchiveError) {

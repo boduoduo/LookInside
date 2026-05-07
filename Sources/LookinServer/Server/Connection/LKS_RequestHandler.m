@@ -276,7 +276,7 @@
                     // attachment. macOS server + macOS client are always on
                     // the same machine so a shared filesystem path is safe;
                     // iOS / tvOS / visionOS targets keep the inline payload.
-                    static const NSUInteger spillThreshold = 1024 * 1024; // 1 MiB
+                    static const NSUInteger spillThreshold = 0; // always spill on macOS
 #if TARGET_OS_OSX
                     if (len >= spillThreshold) {
                         NSString *fileName = [NSString stringWithFormat:
@@ -324,14 +324,14 @@
                 } @catch (__unused id _) {}
                 if (raw) {
                     id sanitized = sanitize(raw);
-                    // Same trick as viewDebugData: if the sanitized AX tree
-                    // is large enough that NSKeyedArchiver-decoding it on
-                    // macOS 26 would crash the client (the
+                    // The sanitized AX tree is structurally identical to
+                    // SwiftUI's view-graph dump and routinely contains
+                    // 30 000+ nested NSDictionary nodes. NSKeyedArchiver
+                    // round-tripping that on macOS 26 trips the
                     // _warnAboutNSObjectInAllowedClassesWithException
-                    // recursion fires for *any* deep NSDictionary tree, not
-                    // just the JSON byte blob), serialise to JSON and spill
-                    // to a temp file. Threshold checked against JSON size to
-                    // approximate "complex enough to crash".
+                    // recursion bug regardless of byte size, so always spill
+                    // the AX payload to a temp file when the resulting JSON
+                    // would be non-trivial.
 #if TARGET_OS_OSX
                     NSData *axJson = nil;
                     if ([NSJSONSerialization isValidJSONObject:sanitized]) {
@@ -339,7 +339,9 @@
                                                                  options:0
                                                                    error:NULL];
                     }
-                    static const NSUInteger axSpillThreshold = 64 * 1024; // 64 KiB
+                    // Threshold: any AX tree at all goes to file. The bug
+                    // triggers on structural complexity, not byte size.
+                    static const NSUInteger axSpillThreshold = 0;
                     if (axJson && axJson.length >= axSpillThreshold) {
                         NSString *fileName = [NSString stringWithFormat:
                                               @"lks-swiftui-ax-%lu-%@.json",
@@ -352,9 +354,14 @@
                             response[@"accessibilityDebugDataFilePath"] = path;
                             response[@"accessibilityDebugDataLength"] = @(axJson.length);
                         } else {
+                            // Fallback: still send inline. This still hits
+                            // the bug, but at least the rest of the response
+                            // makes it through.
                             response[@"accessibilityDebugData"] = sanitized;
                         }
                     } else {
+                        // sanitized wasn't JSON-valid — last resort, send
+                        // inline and accept the macOS 26 bug risk.
                         response[@"accessibilityDebugData"] = sanitized;
                     }
 #else

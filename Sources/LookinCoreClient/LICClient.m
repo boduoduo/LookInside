@@ -1128,27 +1128,44 @@ static id LICSafeNumber(double v) {
 
     NSMutableDictionary *out = [(NSDictionary *)response.data mutableCopy];
 
-    // Server returns makeViewDebugData's raw NSData with format="raw" so we
-    // can JSON-decode it client-side without losing the Swift-typed leaves
-    // that a server-side description fallback would have flattened.
-    NSData *rawVDD = out[@"viewDebugData"];
-    if ([rawVDD isKindOfClass:[NSData class]]) {
+    // Resolve the viewDebugData payload depending on transport mode set by
+    // the server:
+    //   format=raw  → inline NSData (small payloads, iOS/tvOS/visionOS)
+    //   format=file → server spilled a temp file path because the bytes
+    //                 were too large to put through NSKeyedArchiver without
+    //                 tripping the macOS 26 NSCoder bug. Read it here.
+    NSString *fileFormat = out[@"viewDebugDataFormat"];
+    NSString *filePath = out[@"viewDebugDataFilePath"];
+    NSData *inlineData = out[@"viewDebugData"];
+    NSData *bytes = nil;
+    if ([fileFormat isEqualToString:@"file"] && [filePath isKindOfClass:[NSString class]]) {
+        NSError *readErr = nil;
+        bytes = [NSData dataWithContentsOfFile:filePath
+                                       options:NSDataReadingMappedIfSafe
+                                         error:&readErr];
+        // Best-effort cleanup so the temp dir doesn't accumulate spillage.
+        [[NSFileManager defaultManager] removeItemAtPath:filePath error:NULL];
+        [out removeObjectForKey:@"viewDebugDataFilePath"];
+    } else if ([inlineData isKindOfClass:[NSData class]]) {
+        bytes = inlineData;
+    }
+
+    if (bytes) {
         NSError *jsonErr = nil;
-        id parsed = [NSJSONSerialization JSONObjectWithData:rawVDD options:NSJSONReadingFragmentsAllowed error:&jsonErr];
+        id parsed = [NSJSONSerialization JSONObjectWithData:bytes options:NSJSONReadingFragmentsAllowed error:&jsonErr];
         if (parsed) {
             out[@"viewDebugData"] = parsed;
             out[@"viewDebugDataFormat"] = @"json";
         } else {
             // Best-effort fallback: dump first 1KB as hex so callers can debug.
-            NSData *d = rawVDD;
             NSMutableString *hex = [NSMutableString stringWithCapacity:1024];
-            const uint8_t *b = d.bytes;
-            for (NSUInteger i = 0; i < MIN((NSUInteger)1024, d.length); i++) {
+            const uint8_t *b = bytes.bytes;
+            for (NSUInteger i = 0; i < MIN((NSUInteger)1024, bytes.length); i++) {
                 [hex appendFormat:@"%02x", b[i]];
             }
             out[@"viewDebugData"] = hex;
             out[@"viewDebugDataFormat"] = @"hex";
-            out[@"viewDebugDataLength"] = @(d.length);
+            out[@"viewDebugDataLength"] = @(bytes.length);
         }
     }
 

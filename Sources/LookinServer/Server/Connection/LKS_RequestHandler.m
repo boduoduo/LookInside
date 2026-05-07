@@ -260,14 +260,57 @@
                     raw = ((id (*)(id, SEL))objc_msgSend)(resolvedObject, makeViewDebugDataSel);
                 } @catch (__unused id _) {}
                 if ([raw isKindOfClass:[NSData class]]) {
-                    // Forward the raw bytes verbatim — NSData is plist-safe so
-                    // it survives NSKeyedArchiver, and the client decodes the
-                    // payload itself. This keeps every field that Apple's
-                    // selector returned (including Swift values that wouldn't
-                    // survive description-fallback sanitisation).
-                    response[@"viewDebugData"] = raw;
+                    NSData *rawData = (NSData *)raw;
+                    NSUInteger len = rawData.length;
+                    // Large NSData payloads (notably SwiftUIDebugData's 50 MB
+                    // JSON for non-trivial hosting views) trip a macOS 26
+                    // NSKeyedUnarchiver bug on the client where the secure-
+                    // coding warning generator self-recurses on +[NSObject
+                    // description] and overflows the stack guard with SIGBUS
+                    // while decoding nested NSDictionary trees.
+                    //
+                    // Workaround: spool any payload above the threshold to a
+                    // temp file under NSTemporaryDirectory() and put just the
+                    // path in the response. The client maps it back into the
+                    // viewDebugData field after decoding the (now small)
+                    // attachment. macOS server + macOS client are always on
+                    // the same machine so a shared filesystem path is safe;
+                    // iOS / tvOS / visionOS targets keep the inline payload.
+                    static const NSUInteger spillThreshold = 1024 * 1024; // 1 MiB
+#if TARGET_OS_OSX
+                    if (len >= spillThreshold) {
+                        NSString *fileName = [NSString stringWithFormat:
+                                              @"lks-swiftui-%lu-%@.json",
+                                              oid, [[NSUUID UUID] UUIDString]];
+                        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:fileName];
+                        NSError *writeErr = nil;
+                        BOOL ok = [rawData writeToFile:path
+                                               options:NSDataWritingAtomic
+                                                 error:&writeErr];
+                        if (ok) {
+                            response[@"viewDebugDataFormat"] = @"file";
+                            response[@"viewDebugDataFilePath"] = path;
+                            response[@"viewDebugDataLength"] = @(len);
+                            // Don't include the bytes themselves — that is the
+                            // entire point of the spill.
+                        } else {
+                            // Fall back to inline if the spool failed; the
+                            // client may still hit the macOS 26 bug, but
+                            // truncating silently would be worse.
+                            response[@"viewDebugData"] = rawData;
+                            response[@"viewDebugDataFormat"] = @"raw";
+                            response[@"viewDebugDataLength"] = @(len);
+                        }
+                    } else {
+                        response[@"viewDebugData"] = rawData;
+                        response[@"viewDebugDataFormat"] = @"raw";
+                        response[@"viewDebugDataLength"] = @(len);
+                    }
+#else
+                    response[@"viewDebugData"] = rawData;
                     response[@"viewDebugDataFormat"] = @"raw";
-                    response[@"viewDebugDataLength"] = @([(NSData *)raw length]);
+                    response[@"viewDebugDataLength"] = @(len);
+#endif
                 } else if (raw) {
                     response[@"viewDebugData"] = sanitize(raw);
                     response[@"viewDebugDataFormat"] = @"sanitized";

@@ -1245,32 +1245,103 @@ private enum SwiftUIViewTree {
             return "(viewDebugData missing — server did not return SwiftUI tree)"
         }
 
-        var lines: [String] = []
-        walk(root, depth: -1, into: &lines)
-        if lines.isEmpty {
+        // Two-pass: first collect a real tree (so each rendered node knows
+        // its siblings and can pick ├── vs └── + │   vs four-space prefix).
+        let roots = collectTrees(root)
+        if roots.isEmpty {
             return "(no SwiftUI views detected — try the full JSON output without --tree)"
         }
-        return lines.joined(separator: "\n")
+        var out: [String] = []
+        for (i, node) in roots.enumerated() {
+            renderTree(node, prefix: "", isLast: i == roots.count - 1, isRoot: true, into: &out)
+        }
+        return out.joined(separator: "\n")
     }
 
-    /// Walks the JSON tree. Nodes whose readableType matches a view kind get
-    /// printed at the current depth and bump depth for their children; others
-    /// are transparent.
-    private static func walk(_ node: Any, depth: Int, into lines: inout [String]) {
+    /// Tree node that represents one *visible* SwiftUI view kind plus the
+    /// (possibly transparent) wrapper subtree beneath it.
+    private final class Node {
+        let kind: String
+        var children: [Node] = []
+        init(_ kind: String) { self.kind = kind }
+    }
+
+    /// Walks the JSON tree, collecting only nodes whose properties match a
+    /// known view kind. Transparent wrappers (modifiers, _PaddingLayout, etc.)
+    /// are collapsed: their visible children re-parent to the nearest visible
+    /// ancestor — exactly the same logic the previous flat-line walker had,
+    /// but materialised so the renderer can draw connectors.
+    private static func collectTrees(_ node: Any) -> [Node] {
+        var roots: [Node] = []
+        collect(node, into: &roots)
+        return roots
+    }
+
+    private static func collect(_ node: Any, into siblings: inout [Node]) {
         if let arr = node as? [Any] {
-            for c in arr { walk(c, depth: depth, into: &lines) }
+            for c in arr { collect(c, into: &siblings) }
             return
         }
         guard let dict = node as? [String: Any] else { return }
 
-        let kind = nodeKind(dict)
-        var nextDepth = depth
-        if let kind {
-            lines.append(String(repeating: "  ", count: max(depth + 1, 0)) + kind)
-            nextDepth = depth + 1
+        let kindToken = nodeKind(dict)
+        if let kind = kindToken {
+            let n = Node(kind)
+            for child in (dict["children"] as? [Any] ?? []) {
+                collect(child, into: &n.children)
+            }
+            siblings.append(n)
+        } else {
+            for child in (dict["children"] as? [Any] ?? []) {
+                collect(child, into: &siblings)
+            }
         }
-        for child in (dict["children"] as? [Any] ?? []) {
-            walk(child, depth: nextDepth, into: &lines)
+    }
+
+    /// Renders a tree node as its own line plus recursive children, using
+    /// box-drawing connectors:
+    ///
+    ///     VStack
+    ///     ├── Text
+    ///     ├── ZStack
+    ///     │   ├── Rectangle
+    ///     │   ├── Image
+    ///     │   └── Image
+    ///     └── HStack
+    ///         ├── Text
+    ///         ├── Text
+    ///         └── Text
+    ///
+    /// `prefix` carries the connector ladder for ancestors (│ if there's
+    /// still a sibling below, four spaces if the ancestor was the last).
+    /// `isRoot` suppresses the connector for the very first level so the
+    /// root view kind sits flush left.
+    private static func renderTree(_ node: Node,
+                                   prefix: String,
+                                   isLast: Bool,
+                                   isRoot: Bool,
+                                   into out: inout [String]) {
+        let line: String
+        if isRoot {
+            line = node.kind
+        } else {
+            let connector = isLast ? "└── " : "├── "
+            line = prefix + connector + node.kind
+        }
+        out.append(line)
+
+        let childPrefix: String
+        if isRoot {
+            childPrefix = ""
+        } else {
+            childPrefix = prefix + (isLast ? "    " : "│   ")
+        }
+        for (i, child) in node.children.enumerated() {
+            renderTree(child,
+                       prefix: childPrefix,
+                       isLast: i == node.children.count - 1,
+                       isRoot: false,
+                       into: &out)
         }
     }
 

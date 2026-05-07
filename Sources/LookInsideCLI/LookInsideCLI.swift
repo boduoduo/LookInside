@@ -205,9 +205,29 @@ private struct Attrs: ParsableCommand {
     @Option(help: "Layer OID from `lookinside hierarchy`.")
     var oid: UInt
 
+    @Flag(name: [.long, .customShort("s")],
+          help: "Print a flat summary table instead of the full JSON.")
+    var summary: Bool = false
+
+    @Flag(name: .long,
+          help: "Print the flattened attribute list as a JSON array. Mutually exclusive with --summary.")
+    var items: Bool = false
+
+    mutating func validate() throws {
+        if summary && items {
+            throw ValidationError("--summary and --items are mutually exclusive.")
+        }
+    }
+
     mutating func run() throws {
         let json = try CLIClient().allAttrGroupsJSON(target: options.target, oid: oid)
-        StandardPrinter.printLine(json)
+        if summary {
+            StandardPrinter.printLine(AttrsSummary.render(fromJSON: json))
+        } else if items {
+            StandardPrinter.printLine(AttrsSummary.renderItemsJSON(fromJSON: json))
+        } else {
+            StandardPrinter.printLine(json)
+        }
     }
 }
 
@@ -229,6 +249,157 @@ private struct Ivars: ParsableCommand {
     mutating func run() throws {
         let json = try CLIClient().introspectJSON(target: options.target, oid: oid)
         StandardPrinter.printLine(json)
+    }
+}
+
+/// Flattens the nested group → section → attribute JSON returned by
+/// `allAttrGroupsJSON` into a table or JSON array.
+///
+/// The payload is an array of group objects:
+///   [ { "group": "la", "sections": [ { "section": "lb_f", "attributes": [
+///       { "id": "lb_f_n", "type": 24, "value": ".SFUI-Semibold" } ] } ] } ]
+///
+/// Type codes: 5/26=int  12/13=float  14=bool  17=CGPoint  20=CGRect
+///             22=UIEdgeInsets  24=string  27=color{r,g,b,a}  28=optional/null
+private enum AttrsSummary {
+
+    struct Item {
+        var group: String
+        var section: String
+        var id: String
+        var type: Int
+        var formatted: String
+        var rawValue: Any?
+    }
+
+    static func extractItems(fromJSON jsonString: String) -> [Item]? {
+        guard let data = jsonString.data(using: .utf8),
+              let groups = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return nil
+        }
+        var items: [Item] = []
+        for group in groups {
+            let groupName = group["group"] as? String ?? ""
+            for section in (group["sections"] as? [[String: Any]] ?? []) {
+                let sectionName = section["section"] as? String ?? ""
+                for attr in (section["attributes"] as? [[String: Any]] ?? []) {
+                    let id = attr["id"] as? String ?? ""
+                    let type = attr["type"] as? Int ?? 0
+                    let raw = attr["value"]
+                    items.append(Item(group: groupName, section: sectionName,
+                                      id: id, type: type,
+                                      formatted: formatValue(type: type, value: raw),
+                                      rawValue: raw))
+                }
+            }
+        }
+        return items
+    }
+
+    static func render(fromJSON jsonString: String) -> String {
+        guard let items = extractItems(fromJSON: jsonString) else {
+            return "(error: could not parse attrs JSON)"
+        }
+        if items.isEmpty { return "(no attributes)" }
+        return formatTable(items)
+    }
+
+    static func renderItemsJSON(fromJSON jsonString: String) -> String {
+        guard let data = jsonString.data(using: .utf8),
+              let groups = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            return "[]"
+        }
+        var flat: [[String: Any]] = []
+        for group in groups {
+            let groupName = group["group"] as? String ?? ""
+            for section in (group["sections"] as? [[String: Any]] ?? []) {
+                let sectionName = section["section"] as? String ?? ""
+                for attr in (section["attributes"] as? [[String: Any]] ?? []) {
+                    var item: [String: Any] = [
+                        "group": groupName,
+                        "section": sectionName,
+                        "id": attr["id"] as? String ?? "",
+                        "type": attr["type"] as? Int ?? 0,
+                        "value": attr["value"] ?? NSNull(),
+                    ]
+                    let type = attr["type"] as? Int ?? 0
+                    item["formatted"] = formatValue(type: type, value: attr["value"])
+                    flat.append(item)
+                }
+            }
+        }
+        let opts: JSONSerialization.WritingOptions = [.prettyPrinted, .sortedKeys, .fragmentsAllowed]
+        guard let out = try? JSONSerialization.data(withJSONObject: flat, options: opts),
+              let str = String(data: out, encoding: .utf8) else { return "[]" }
+        return str
+    }
+
+    private static func formatValue(type: Int, value: Any?) -> String {
+        guard let v = value, !(v is NSNull) else { return "null" }
+        switch type {
+        case 14:
+            if let b = v as? Bool { return b ? "true" : "false" }
+        case 12, 13:
+            if let n = v as? Double { return String(format: "%.2f", n) }
+            if let n = v as? Int { return "\(n)" }
+        case 5, 26:
+            if let n = v as? Int { return "\(n)" }
+        case 24:
+            if let s = v as? String { return "\"\(s)\"" }
+        case 27:
+            if let c = v as? [String: Any] {
+                let r = toDouble(c["r"]), g = toDouble(c["g"]),
+                    b = toDouble(c["b"]), a = toDouble(c["a"])
+                return String(format: "#%02X%02X%02X%02X",
+                              Int((r * 255).rounded()), Int((g * 255).rounded()),
+                              Int((b * 255).rounded()), Int((a * 255).rounded()))
+            }
+        case 17:
+            if let p = v as? [String: Any] {
+                return String(format: "x=%.2f y=%.2f", toDouble(p["x"]), toDouble(p["y"]))
+            }
+        case 20:
+            if let r = v as? [String: Any] {
+                return String(format: "x=%.0f y=%.0f w=%.0f h=%.0f",
+                              toDouble(r["x"]), toDouble(r["y"]),
+                              toDouble(r["width"]), toDouble(r["height"]))
+            }
+        case 22:
+            if let i = v as? [String: Any] {
+                return String(format: "T=%.0f B=%.0f L=%.0f R=%.0f",
+                              toDouble(i["top"]), toDouble(i["bottom"]),
+                              toDouble(i["left"]), toDouble(i["right"]))
+            }
+        default:
+            break
+        }
+        return "\(v)"
+    }
+
+    private static func toDouble(_ v: Any?) -> Double {
+        if let d = v as? Double { return d }
+        if let i = v as? Int { return Double(i) }
+        return 0
+    }
+
+    private static func formatTable(_ items: [Item]) -> String {
+        func clip(_ s: String, _ n: Int) -> String {
+            s.count <= n ? s : String(s.prefix(n - 1)) + "…"
+        }
+        func pad(_ s: String, _ n: Int) -> String {
+            let c = clip(s, n)
+            return c + String(repeating: " ", count: n - c.count)
+        }
+        let cols = [("GROUP", 8), ("SECTION", 10), ("ATTR ID", 16), ("VALUE", 52)]
+        let header = cols.map { pad($0.0, $0.1) }.joined(separator: "  ")
+        var lines = [header.trimmingCharacters(in: .whitespaces),
+                     String(repeating: "-", count: header.count)]
+        for it in items {
+            let row = [pad(it.group, 8), pad(it.section, 10),
+                       pad(it.id, 16), clip(it.formatted, 52)].joined(separator: "  ")
+            lines.append(row)
+        }
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -332,6 +503,10 @@ private enum SwiftUIDebugSummary {
         var fontSize: Double?
         var alignment: String?
         var lineSpacing: Double?
+        /// false when the item was synthesised from the attributed-string
+        /// fallback path (macOS CGDrawingLayer) — frame fields are 0 and
+        /// should not be rendered or relied upon by consumers.
+        var hasFrame: Bool = true
         /// Forms inside the item that we recognised the kind of but didn't
         /// otherwise project into a typed field — version, content-seed,
         /// raw clip path, raw style, etc. Round-tripped to JSON in
@@ -371,6 +546,27 @@ private enum SwiftUIDebugSummary {
             if seen.contains(k) { return false }
             seen.insert(k); return true
         }
+
+        // Fallback for macOS CGDrawingLayer rendering path: no display-list-item
+        // is emitted, but attributed-string descriptions (NSFont-tagged leaf
+        // strings) are still present. Surface them as frame-less text items so
+        // --summary and --items remain useful on macOS.
+        if items.isEmpty && !attrIndex.isEmpty {
+            items = attrIndex.values
+                .sorted(by: { $0.text < $1.text })
+                .compactMap { info -> Item? in
+                    guard !info.text.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+                    var it = Item(identity: "", kind: "text",
+                                  x: 0, y: 0, w: 0, h: 0, opacity: 1.0,
+                                  cornerRadius: nil, fillColor: info.color,
+                                  imageSize: nil, text: info.text, font: info.font,
+                                  fontSize: info.fontSize, alignment: info.alignment,
+                                  lineSpacing: info.lineSpacing)
+                    it.hasFrame = false
+                    return it
+                }
+        }
+
         return items
     }
 
@@ -397,9 +593,12 @@ private enum SwiftUIDebugSummary {
             var d: [String: Any] = [
                 "identity": it.identity,
                 "kind": it.kind,
-                "x": it.x, "y": it.y, "w": it.w, "h": it.h,
+                "hasFrame": it.hasFrame,
                 "opacity": it.opacity,
             ]
+            if it.hasFrame {
+                d["x"] = it.x; d["y"] = it.y; d["w"] = it.w; d["h"] = it.h
+            }
             if let r = it.cornerRadius { d["cornerRadius"] = r }
             if let c = it.fillColor    { d["fillColor"] = c }
             if let s = it.imageSize    { d["imageSize"] = ["w": s.0, "h": s.1] }
@@ -422,6 +621,11 @@ private enum SwiftUIDebugSummary {
     // MARK: - Table render
 
     private static func formatTable(_ items: [Item]) -> String {
+        // macOS CGDrawingLayer fallback: all items lack frame info
+        if items.allSatisfy({ !$0.hasFrame }) {
+            return formatFramelessTable(items)
+        }
+
         func pad(_ s: String, _ n: Int) -> String {
             let len = s.count
             if len >= n { return clipString(s, n) }
@@ -485,6 +689,36 @@ private enum SwiftUIDebugSummary {
         lines.append("  - RADIUS is heuristic, derived from clip-path geometry; may be ± 1pt off the")
         lines.append("    SwiftUI source value due to anti-alias path expansion.")
 
+        return lines.joined(separator: "\n")
+    }
+
+    /// Compact table for the macOS CGDrawingLayer fallback path where frame
+    /// information is unavailable. Shows TEXT / FONT / SIZE / COLOR only.
+    private static func formatFramelessTable(_ items: [Item]) -> String {
+        func clip(_ s: String, _ n: Int) -> String {
+            s.count <= n ? s : String(s.prefix(n - 1)) + "…"
+        }
+        func pad(_ s: String, _ n: Int) -> String {
+            let c = clip(s, n)
+            return c + String(repeating: " ", count: n - c.count)
+        }
+        let cols: [(String, Int)] = [("TEXT", 50), ("FONT", 24), ("SIZE", 6), ("COLOR", 10)]
+        let header = cols.map { pad($0.0, $0.1) }.joined(separator: "  ")
+        var lines = [
+            "(macOS CGDrawingLayer path — position unavailable; text/font/color only)",
+            header.trimmingCharacters(in: .whitespaces),
+            String(repeating: "-", count: cols.reduce(0) { $0 + $1.1 + 2 } - 2),
+        ]
+        for it in items where it.kind == "text" {
+            guard let text = it.text else { continue }
+            let row = [
+                pad("\"\(text)\"", 50),
+                pad(it.font ?? "?", 24),
+                pad(it.fontSize.map { String(format: "%.0fpt", $0) } ?? "?", 6),
+                clip(it.fillColor ?? "?", 10),
+            ].joined(separator: "  ")
+            lines.append(row)
+        }
         return lines.joined(separator: "\n")
     }
 

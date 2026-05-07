@@ -20,7 +20,12 @@
 #pragma mark - Version
 
 /// current connection protocol version of LookinServer
-static const int LOOKIN_SERVER_VERSION = 8;
+// LookinServer 协议版本号。上游 Lookin GUI 1.0.6 之前发布的客户端
+// (LOOKIN_SUPPORTED_SERVER_MAX == 7) 不识别 8，会拒绝连接并提示 "客户端版本过低"。
+// 我们的 fork 把 server 报的版本号锁在 7 以保证与公开 GUI 兼容；CLI 与新增
+// RPC (Introspect / SwiftUIDebugData) 的能力靠 LKS_RequestHandler 的
+// canHandleRequestType: 白名单决定，跟版本号解耦。
+static const int LOOKIN_SERVER_VERSION = 7;
 
 /// current release version of LookinServer
 static NSString * const LOOKIN_SERVER_READABLE_VERSION = @"1.3.0";

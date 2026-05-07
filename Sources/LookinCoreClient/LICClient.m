@@ -1191,23 +1191,31 @@ static id LICSafeNumber(double v) {
     NSString *axPath = out[@"accessibilityDebugDataFilePath"];
     NSString *axEncoding = out[@"accessibilityDebugDataEncoding"];
     if ([axFormat isEqualToString:@"file"] && [axPath isKindOfClass:[NSString class]]) {
+        NSError *axReadErr = nil;
         NSData *axBytes = [NSData dataWithContentsOfFile:axPath
                                                  options:NSDataReadingMappedIfSafe
-                                                   error:NULL];
+                                                   error:&axReadErr];
         [[NSFileManager defaultManager] removeItemAtPath:axPath error:NULL];
         [out removeObjectForKey:@"accessibilityDebugDataFilePath"];
+        if (!axBytes) {
+            if (getenv("LOOKINSIDE_DEBUG_DUMP")) {
+                fprintf(stderr, "[lookinside] AX file read failed: %s\n",
+                        axReadErr.localizedDescription.UTF8String ?: "?");
+            }
+        }
         if (axBytes) {
             id axParsed = nil;
+            NSError *axDecodeErr = nil;
             if ([axEncoding isEqualToString:@"plist"]) {
                 axParsed = [NSPropertyListSerialization propertyListWithData:axBytes
                                                                      options:NSPropertyListImmutable
                                                                       format:NULL
-                                                                       error:NULL];
+                                                                       error:&axDecodeErr];
             } else {
                 // default and "json"
                 axParsed = [NSJSONSerialization JSONObjectWithData:axBytes
                                                            options:NSJSONReadingFragmentsAllowed
-                                                             error:NULL];
+                                                             error:&axDecodeErr];
             }
             // Cross-try if first decoder failed.
             if (!axParsed && ![axEncoding isEqualToString:@"plist"]) {
@@ -1215,6 +1223,11 @@ static id LICSafeNumber(double v) {
                                                                      options:NSPropertyListImmutable
                                                                       format:NULL
                                                                        error:NULL];
+            }
+            if (!axParsed && getenv("LOOKINSIDE_DEBUG_DUMP")) {
+                fprintf(stderr, "[lookinside] AX decode (%s) failed: %s\n",
+                        axEncoding.UTF8String ?: "?",
+                        axDecodeErr.localizedDescription.UTF8String ?: "?");
             }
             if (axParsed) {
                 out[@"accessibilityDebugData"] = axParsed;

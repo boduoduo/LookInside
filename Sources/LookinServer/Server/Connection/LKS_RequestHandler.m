@@ -223,15 +223,22 @@
         // payload stays safe; JSON-parsed payloads from makeViewDebugData are
         // already pure NSArray/NSDictionary/NSString/NSNumber and pass through
         // verbatim.
-        __block id (^sanitize)(id) = nil;
-        sanitize = ^id(id obj) {
+        //
+        // Also caps recursion depth: SwiftUI's accessibilityDebugData routinely
+        // nests 500+ levels deep, well beyond NSPropertyListSerialization's
+        // (and NSJSONSerialization's) ~512-level recursion limit. Anything
+        // past depth 60 is summarised as "<truncated>" so the result is
+        // serialisable by either format.
+        __block id (^sanitizeDepth)(id, int) = nil;
+        sanitizeDepth = ^id(id obj, int depth) {
+            if (depth > 60) return @"<truncated>";
             if (!obj || [obj isKindOfClass:[NSNull class]]) return obj;
             if ([obj isKindOfClass:[NSString class]] ||
                 [obj isKindOfClass:[NSNumber class]]) return obj;
             if ([obj isKindOfClass:[NSArray class]]) {
                 NSMutableArray *arr = [NSMutableArray arrayWithCapacity:[obj count]];
                 for (id sub in (NSArray *)obj) {
-                    id s = sanitize(sub);
+                    id s = sanitizeDepth(sub, depth + 1);
                     [arr addObject:s ?: [NSNull null]];
                 }
                 return arr;
@@ -240,7 +247,7 @@
                 NSMutableDictionary *out = [NSMutableDictionary dictionary];
                 [(NSDictionary *)obj enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
                     NSString *k = [key isKindOfClass:[NSString class]] ? key : [key description];
-                    if (k) out[k] = sanitize(value) ?: [NSNull null];
+                    if (k) out[k] = sanitizeDepth(value, depth + 1) ?: [NSNull null];
                 }];
                 return out;
             }
@@ -252,6 +259,8 @@
                 return @"<undescribable>";
             }
         };
+        // Convenience: top-level entry that starts at depth 0.
+        id (^sanitize)(id) = ^id(id obj) { return sanitizeDepth(obj, 0); };
 
         void (^collect)(void) = ^{
             if ([resolvedObject respondsToSelector:makeViewDebugDataSel]) {

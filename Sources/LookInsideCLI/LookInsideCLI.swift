@@ -1262,8 +1262,12 @@ private enum SwiftUIViewTree {
     /// (possibly transparent) wrapper subtree beneath it.
     private final class Node {
         let kind: String
+        var annotation: String?      // e.g. `"登录"` for Text, `asset="qrcode"` for Image
         var children: [Node] = []
-        init(_ kind: String) { self.kind = kind }
+        init(_ kind: String, annotation: String? = nil) {
+            self.kind = kind
+            self.annotation = annotation
+        }
     }
 
     /// Walks the JSON tree, collecting only nodes whose properties match a
@@ -1284,9 +1288,8 @@ private enum SwiftUIViewTree {
         }
         guard let dict = node as? [String: Any] else { return }
 
-        let kindToken = nodeKind(dict)
-        if let kind = kindToken {
-            let n = Node(kind)
+        if let (kind, annotation) = nodeKindAndAnnotation(dict) {
+            let n = Node(kind, annotation: annotation)
             for child in (dict["children"] as? [Any] ?? []) {
                 collect(child, into: &n.children)
             }
@@ -1302,15 +1305,15 @@ private enum SwiftUIViewTree {
     /// box-drawing connectors:
     ///
     ///     VStack
-    ///     ├── Text
+    ///     ├── Text  "title"
     ///     ├── ZStack
     ///     │   ├── Rectangle
-    ///     │   ├── Image
-    ///     │   └── Image
+    ///     │   ├── Image  asset="qrcode"
+    ///     │   └── Image  asset="logo"
     ///     └── HStack
-    ///         ├── Text
-    ///         ├── Text
-    ///         └── Text
+    ///         ├── Text  "请使用"
+    ///         ├── Text  "手机端网易爆米花"
+    ///         └── Text  "扫码登录或扫码下载网易爆米花 App"
     ///
     /// `prefix` carries the connector ladder for ancestors (│ if there's
     /// still a sibling below, four spaces if the ancestor was the last).
@@ -1321,12 +1324,16 @@ private enum SwiftUIViewTree {
                                    isLast: Bool,
                                    isRoot: Bool,
                                    into out: inout [String]) {
+        var label = node.kind
+        if let a = node.annotation, !a.isEmpty {
+            label += "  " + a
+        }
         let line: String
         if isRoot {
-            line = node.kind
+            line = label
         } else {
             let connector = isLast ? "└── " : "├── "
-            line = prefix + connector + node.kind
+            line = prefix + connector + label
         }
         out.append(line)
 
@@ -1345,9 +1352,16 @@ private enum SwiftUIViewTree {
         }
     }
 
-    /// Inspects a node's `properties` array, returns the most-specific view
-    /// kind we're willing to surface, or nil if none match.
-    private static func nodeKind(_ node: [String: Any]) -> String? {
+    /// Inspects a node's `properties` array, returns (kind, annotation).
+    /// Annotation is a short human-readable description shown after the kind:
+    ///   - Text   → `"verbatim string" Npt`
+    ///   - Image  → `asset="<name>"` for catalog/symbol assets
+    ///   - Color  → `rgba(r,g,b,a)` for resolved literals,
+    ///              `name="<token>"` for catalog colours
+    ///   - Stack  → `(N items)` if TupleView arity is recoverable
+    ///   - ProgressView → `(indeterminate)` when the value carries that flag
+    /// Returns nil for nodes that aren't visible view kinds.
+    private static func nodeKindAndAnnotation(_ node: [String: Any]) -> (String, String?)? {
         guard let props = node["properties"] as? [[String: Any]] else { return nil }
         for p in props {
             let attr = (p["attribute"] as? [String: Any]) ?? p
@@ -1355,10 +1369,131 @@ private enum SwiftUIViewTree {
             // Strip generic parameters: 'VStack<TupleView<...>>' -> 'VStack'
             let base = String(t.prefix(while: { $0 != "<" }))
             if viewKinds.contains(base) {
-                return prettyName(base)
+                let kind = prettyName(base)
+                let annotation = annotationFor(kind: kind, attr: attr, fullType: t, node: node)
+                return (kind, annotation)
             }
         }
         return nil
+    }
+
+    /// Builds the per-kind annotation. Each branch is best-effort: if the
+    /// expected sub-attribute path isn't present, we silently return nil so
+    /// the line stays clean.
+    private static func annotationFor(kind: String,
+                                       attr: [String: Any],
+                                       fullType: String,
+                                       node: [String: Any]) -> String? {
+        switch kind {
+        case "Text":
+            return textAnnotation(attr)
+        case "Image":
+            return imageAnnotation(attr)
+        case "Color":
+            return colorAnnotation(attr)
+        case "VStack", "HStack", "ZStack",
+             "LazyVStack", "LazyHStack", "LazyVGrid", "LazyHGrid":
+            return stackAnnotation(fullType: fullType)
+        case "ProgressView":
+            return progressAnnotation(node: node)
+        default:
+            return nil
+        }
+    }
+
+    /// Text → `"<verbatim>" <size>pt` (size only when SystemProvider gave it).
+    private static func textAnnotation(_ attr: [String: Any]) -> String? {
+        let verbatim = deepFindValue(attr: attr, name: "verbatim") as? String
+        // Localized text uses `key` instead of `verbatim`.
+        let key = deepFindValue(attr: attr, name: "key") as? String
+        let str = verbatim ?? key
+        let size = deepFindValue(attr: attr, name: "size") as? Double
+
+        var parts: [String] = []
+        if let s = str { parts.append("\"\(s)\"") }
+        if let sz = size { parts.append(String(format: "%.0fpt", sz)) }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    /// Image → `asset="<name>"` for named/system assets, otherwise nil.
+    private static func imageAnnotation(_ attr: [String: Any]) -> String? {
+        if let name = deepFindValue(attr: attr, name: "name") as? String {
+            return "asset=\"\(name)\""
+        }
+        return nil
+    }
+
+    /// Color → `rgba(R,G,B,A)` for resolved literals, `name="<token>"` for
+    /// catalog colours, nil for the bare placeholder Color box.
+    private static func colorAnnotation(_ attr: [String: Any]) -> String? {
+        if let name = deepFindValue(attr: attr, name: "name") as? String {
+            return "name=\"\(name)\""
+        }
+        if let comps = deepFindValue(attr: attr, name: "color") as? [String: Any],
+           let arr = comps["color"] as? [Double], arr.count >= 4 {
+            return String(format: "rgba(%.2f, %.2f, %.2f, %.2f)", arr[0], arr[1], arr[2], arr[3])
+        }
+        // Plain `color` array (older SwiftUI without ResolvedHDR wrapper).
+        if let arr = deepFindValue(attr: attr, name: "color") as? [Double], arr.count >= 4 {
+            return String(format: "rgba(%.2f, %.2f, %.2f, %.2f)", arr[0], arr[1], arr[2], arr[3])
+        }
+        return nil
+    }
+
+    /// VStack / HStack / ZStack → counts immediate items in the TupleView
+    /// generic by walking top-level commas. Returns nil when the type doesn't
+    /// expose its arity that way.
+    private static func stackAnnotation(fullType: String) -> String? {
+        guard let s = fullType.range(of: "TupleView<("),
+              let e = fullType.range(of: ")>", range: s.upperBound..<fullType.endIndex) else {
+            return nil
+        }
+        let inner = fullType[s.upperBound..<e.lowerBound]
+        var depth = 0
+        var commas = 0
+        for ch in inner {
+            switch ch {
+            case "<", "(": depth += 1
+            case ">", ")": depth -= 1
+            case "," where depth == 0: commas += 1
+            default: break
+            }
+        }
+        let arity = commas + 1
+        return arity > 0 ? "(\(arity) item\(arity == 1 ? "" : "s"))" : nil
+    }
+
+    /// ProgressView → `(indeterminate)` when ProgressViewValue.absolute.alwaysIndeterminate.
+    private static func progressAnnotation(node: [String: Any]) -> String? {
+        for p in (node["properties"] as? [[String: Any]] ?? []) {
+            let attr = (p["attribute"] as? [String: Any]) ?? p
+            if let v = deepFindValue(attr: attr, name: "alwaysIndeterminate") as? Bool, v {
+                return "(indeterminate)"
+            }
+        }
+        return nil
+    }
+
+    /// Walks the attribute's `subattributes` tree depth-first, returning the
+    /// first leaf whose `name` matches. Used to dig out Text.storage.verbatim,
+    /// Image.provider.name, Color.provider.color, etc. without hardcoding the
+    /// exact box-class chain (Apple wraps these differently across releases).
+    private static func deepFindValue(attr: [String: Any], name target: String) -> Any? {
+        if let n = attr["name"] as? String, n == target,
+           let v = attr["value"] {
+            return v
+        }
+        for sub in (attr["subattributes"] as? [[String: Any]] ?? []) {
+            if let r = deepFindValue(attr: sub, name: target) { return r }
+        }
+        return nil
+    }
+
+    /// Inspects a node's `properties` array, returns the most-specific view
+    /// kind we're willing to surface, or nil if none match. Kept as a thin
+    /// wrapper for places that want kind-only.
+    private static func nodeKind(_ node: [String: Any]) -> String? {
+        nodeKindAndAnnotation(node)?.0
     }
 
     /// `ResolvedProgressView` is SwiftUI's runtime form of `ProgressView`;

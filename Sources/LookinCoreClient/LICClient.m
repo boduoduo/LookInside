@@ -1182,10 +1182,14 @@ static id LICSafeNumber(double v) {
     }
 
     // accessibilityDebugData mirrors the same spill mechanism — read the
-    // file, parse JSON, drop the path. The transferred attachment carries
-    // only the path so the macOS 26 NSCoder bug never sees the deep AX tree.
+    // file, parse, drop the path. The transferred attachment carries only
+    // the path so the macOS 26 NSCoder bug never sees the deep AX tree.
+    // Encoding may be either "json" (preferred) or "plist" (fallback when
+    // the sanitized tree contained non-JSON values like NSDate); we try
+    // whichever the server tagged it with, then the other.
     NSString *axFormat = out[@"accessibilityDebugDataFormat"];
     NSString *axPath = out[@"accessibilityDebugDataFilePath"];
+    NSString *axEncoding = out[@"accessibilityDebugDataEncoding"];
     if ([axFormat isEqualToString:@"file"] && [axPath isKindOfClass:[NSString class]]) {
         NSData *axBytes = [NSData dataWithContentsOfFile:axPath
                                                  options:NSDataReadingMappedIfSafe
@@ -1193,12 +1197,28 @@ static id LICSafeNumber(double v) {
         [[NSFileManager defaultManager] removeItemAtPath:axPath error:NULL];
         [out removeObjectForKey:@"accessibilityDebugDataFilePath"];
         if (axBytes) {
-            id axParsed = [NSJSONSerialization JSONObjectWithData:axBytes
-                                                          options:NSJSONReadingFragmentsAllowed
-                                                            error:NULL];
+            id axParsed = nil;
+            if ([axEncoding isEqualToString:@"plist"]) {
+                axParsed = [NSPropertyListSerialization propertyListWithData:axBytes
+                                                                     options:NSPropertyListImmutable
+                                                                      format:NULL
+                                                                       error:NULL];
+            } else {
+                // default and "json"
+                axParsed = [NSJSONSerialization JSONObjectWithData:axBytes
+                                                           options:NSJSONReadingFragmentsAllowed
+                                                             error:NULL];
+            }
+            // Cross-try if first decoder failed.
+            if (!axParsed && ![axEncoding isEqualToString:@"plist"]) {
+                axParsed = [NSPropertyListSerialization propertyListWithData:axBytes
+                                                                     options:NSPropertyListImmutable
+                                                                      format:NULL
+                                                                       error:NULL];
+            }
             if (axParsed) {
                 out[@"accessibilityDebugData"] = axParsed;
-                out[@"accessibilityDebugDataFormat"] = @"json";
+                out[@"accessibilityDebugDataFormat"] = axEncoding ?: @"json";
             }
         }
     }

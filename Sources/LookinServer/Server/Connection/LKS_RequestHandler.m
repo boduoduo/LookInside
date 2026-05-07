@@ -330,40 +330,50 @@
                     // round-tripping that on macOS 26 trips the
                     // _warnAboutNSObjectInAllowedClassesWithException
                     // recursion bug regardless of byte size, so always spill
-                    // the AX payload to a temp file when the resulting JSON
-                    // would be non-trivial.
+                    // the AX payload to a temp file no matter the encoding.
 #if TARGET_OS_OSX
-                    NSData *axJson = nil;
+                    NSData *axBytes = nil;
+                    NSString *axEncoding = nil;
+                    // Prefer JSON because the client side can decode it
+                    // without going through NSKeyedUnarchiver (which is what
+                    // we're trying to avoid). When sanitize left non-JSON
+                    // remnants, fall back to a binary plist — it accepts
+                    // any NSObject that conforms to NSCoding and similarly
+                    // doesn't pin the unarchiver allowed-classes set.
                     if ([NSJSONSerialization isValidJSONObject:sanitized]) {
-                        axJson = [NSJSONSerialization dataWithJSONObject:sanitized
-                                                                 options:0
-                                                                   error:NULL];
+                        axBytes = [NSJSONSerialization dataWithJSONObject:sanitized
+                                                                  options:0
+                                                                    error:NULL];
+                        axEncoding = @"json";
                     }
-                    // Threshold: any AX tree at all goes to file. The bug
-                    // triggers on structural complexity, not byte size.
-                    static const NSUInteger axSpillThreshold = 0;
-                    if (axJson && axJson.length >= axSpillThreshold) {
+                    if (!axBytes) {
+                        @try {
+                            axBytes = [NSPropertyListSerialization
+                                       dataWithPropertyList:sanitized
+                                                     format:NSPropertyListBinaryFormat_v1_0
+                                                    options:0
+                                                      error:NULL];
+                            axEncoding = @"plist";
+                        } @catch (__unused id _) {}
+                    }
+                    if (axBytes) {
                         NSString *fileName = [NSString stringWithFormat:
-                                              @"lks-swiftui-ax-%lu-%@.json",
+                                              @"lks-swiftui-ax-%lu-%@.bin",
                                               oid, [[NSUUID UUID] UUIDString]];
                         NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:fileName];
-                        if ([axJson writeToFile:path
-                                       options:NSDataWritingAtomic
-                                         error:NULL]) {
+                        if ([axBytes writeToFile:path
+                                         options:NSDataWritingAtomic
+                                           error:NULL]) {
                             response[@"accessibilityDebugDataFormat"] = @"file";
                             response[@"accessibilityDebugDataFilePath"] = path;
-                            response[@"accessibilityDebugDataLength"] = @(axJson.length);
-                        } else {
-                            // Fallback: still send inline. This still hits
-                            // the bug, but at least the rest of the response
-                            // makes it through.
-                            response[@"accessibilityDebugData"] = sanitized;
+                            response[@"accessibilityDebugDataEncoding"] = axEncoding;
+                            response[@"accessibilityDebugDataLength"] = @(axBytes.length);
                         }
-                    } else {
-                        // sanitized wasn't JSON-valid — last resort, send
-                        // inline and accept the macOS 26 bug risk.
-                        response[@"accessibilityDebugData"] = sanitized;
+                        // If write fails, drop the field rather than fall back
+                        // to inline (which would re-trigger the macOS 26 bug).
                     }
+                    // If neither encoding worked at all, drop the field —
+                    // sending the raw nested dict inline would crash the client.
 #else
                     response[@"accessibilityDebugData"] = sanitized;
 #endif

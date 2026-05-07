@@ -323,7 +323,43 @@
                     raw = ((id (*)(id, SEL))objc_msgSend)(resolvedObject, accessibilityDebugSel);
                 } @catch (__unused id _) {}
                 if (raw) {
-                    response[@"accessibilityDebugData"] = sanitize(raw);
+                    id sanitized = sanitize(raw);
+                    // Same trick as viewDebugData: if the sanitized AX tree
+                    // is large enough that NSKeyedArchiver-decoding it on
+                    // macOS 26 would crash the client (the
+                    // _warnAboutNSObjectInAllowedClassesWithException
+                    // recursion fires for *any* deep NSDictionary tree, not
+                    // just the JSON byte blob), serialise to JSON and spill
+                    // to a temp file. Threshold checked against JSON size to
+                    // approximate "complex enough to crash".
+#if TARGET_OS_OSX
+                    NSData *axJson = nil;
+                    if ([NSJSONSerialization isValidJSONObject:sanitized]) {
+                        axJson = [NSJSONSerialization dataWithJSONObject:sanitized
+                                                                 options:0
+                                                                   error:NULL];
+                    }
+                    static const NSUInteger axSpillThreshold = 64 * 1024; // 64 KiB
+                    if (axJson && axJson.length >= axSpillThreshold) {
+                        NSString *fileName = [NSString stringWithFormat:
+                                              @"lks-swiftui-ax-%lu-%@.json",
+                                              oid, [[NSUUID UUID] UUIDString]];
+                        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:fileName];
+                        if ([axJson writeToFile:path
+                                       options:NSDataWritingAtomic
+                                         error:NULL]) {
+                            response[@"accessibilityDebugDataFormat"] = @"file";
+                            response[@"accessibilityDebugDataFilePath"] = path;
+                            response[@"accessibilityDebugDataLength"] = @(axJson.length);
+                        } else {
+                            response[@"accessibilityDebugData"] = sanitized;
+                        }
+                    } else {
+                        response[@"accessibilityDebugData"] = sanitized;
+                    }
+#else
+                    response[@"accessibilityDebugData"] = sanitized;
+#endif
                 }
             }
         };

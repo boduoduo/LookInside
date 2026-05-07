@@ -1169,6 +1169,28 @@ static id LICSafeNumber(double v) {
         }
     }
 
+    // accessibilityDebugData mirrors the same spill mechanism — read the
+    // file, parse JSON, drop the path. The transferred attachment carries
+    // only the path so the macOS 26 NSCoder bug never sees the deep AX tree.
+    NSString *axFormat = out[@"accessibilityDebugDataFormat"];
+    NSString *axPath = out[@"accessibilityDebugDataFilePath"];
+    if ([axFormat isEqualToString:@"file"] && [axPath isKindOfClass:[NSString class]]) {
+        NSData *axBytes = [NSData dataWithContentsOfFile:axPath
+                                                 options:NSDataReadingMappedIfSafe
+                                                   error:NULL];
+        [[NSFileManager defaultManager] removeItemAtPath:axPath error:NULL];
+        [out removeObjectForKey:@"accessibilityDebugDataFilePath"];
+        if (axBytes) {
+            id axParsed = [NSJSONSerialization JSONObjectWithData:axBytes
+                                                          options:NSJSONReadingFragmentsAllowed
+                                                            error:NULL];
+            if (axParsed) {
+                out[@"accessibilityDebugData"] = axParsed;
+                out[@"accessibilityDebugDataFormat"] = @"json";
+            }
+        }
+    }
+
     NSData *jsonData = [NSJSONSerialization dataWithJSONObject:out options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:error];
     if (!jsonData) {
         return nil;

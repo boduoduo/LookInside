@@ -434,6 +434,9 @@ private struct SwiftUIDebug: ParsableCommand {
                       and an `extras` dict preserving every keyword token
                       we didn't project (version, content-seed, raw clip
                       path, etc.). Use this when scripting consumers.
+          --tree      a SwiftUI-style indented tree of just the visible view
+                      kinds (VStack / HStack / Text / Image / Button / ...),
+                      modifier wrappers and layout-only nodes collapsed.
         """
     )
 
@@ -450,15 +453,28 @@ private struct SwiftUIDebug: ParsableCommand {
           help: "Print the parsed display-list items as a JSON array. Mutually exclusive with --summary.")
     var items: Bool = false
 
+    @Flag(name: .long,
+          help: "Print a SwiftUI-style indented view-kind tree. Mutually exclusive with --summary / --items.")
+    var tree: Bool = false
+
     mutating func run() throws {
-        let json = try CLIClient().swiftUIDebugJSON(target: options.target, oid: oid)
-        if summary && items {
-            throw ValidationError("--summary and --items are mutually exclusive.")
+        let json: String
+        do {
+            json = try CLIClient().swiftUIDebugJSON(target: options.target, oid: oid)
+        } catch {
+            FileHandle.standardError.write(Data("swiftui-debug RPC failed: \(error)\n".utf8))
+            throw ExitCode(1)
+        }
+        let modeCount = [summary, items, tree].filter { $0 }.count
+        if modeCount > 1 {
+            throw ValidationError("--summary, --items, and --tree are mutually exclusive.")
         }
         if summary {
             StandardPrinter.printLine(SwiftUIDebugSummary.render(fromJSON: json))
         } else if items {
             StandardPrinter.printLine(SwiftUIDebugSummary.renderItemsJSON(fromJSON: json))
+        } else if tree {
+            StandardPrinter.printLine(SwiftUIViewTree.render(fromJSON: json))
         } else {
             StandardPrinter.printLine(json)
         }
@@ -1156,6 +1172,131 @@ private enum SwiftUIDebugSummary {
             }
         }
         return nil
+    }
+}
+
+/// Renders Apple's `makeViewDebugData` payload as a SwiftUI-style indented
+/// view tree — the same shape a developer would write in source.
+///
+/// Apple's payload is a tree of nodes, each with a `properties` array. Most
+/// properties are layout/modifier metadata (CGSize, _PaddingLayout, ViewTransform,
+/// _SafeAreaInsetsModifier, ...). The actual visible view kind shows up as
+/// one of the property `readableType` strings — `Text`, `Image`, `Button<...>`,
+/// `VStack<...>`, `HStack<...>`, `ZStack<...>`, `ResolvedProgressView`, etc.
+///
+/// We walk the children tree and only emit a line when a node's properties
+/// contain one of those kinds. Wrapper modifiers (anything else) are skipped
+/// silently — their children attach to the nearest emitted ancestor. This
+/// matches what `lookinside hierarchy` does for AppKit chrome but for the
+/// SwiftUI side, and produces output like:
+///
+///     VStack
+///       Text
+///       ZStack
+///         Rectangle
+///         Image
+///         Image
+///       HStack
+///         Text
+///         Text
+///         Text
+///
+/// The kept-kinds set is intentionally conservative — adding more types is
+/// safe but pollutes the tree with low-value nodes (`OptionalSourceWriter`,
+/// `_VariadicView.Tree`, etc.). Override via `--include-kind` later if needed.
+private enum SwiftUIViewTree {
+
+    /// View kinds we surface in the rendered tree. Anything else is treated
+    /// as a transparent wrapper. Match is on the *base* of the readable type
+    /// string, i.e. the identifier before the first `<`.
+    private static let viewKinds: Set<String> = [
+        // Layout containers
+        "VStack", "HStack", "ZStack", "LazyVStack", "LazyHStack",
+        "LazyVGrid", "LazyHGrid", "Grid", "GridRow",
+        "Group", "Section", "Form", "List", "Table",
+        "ScrollView", "ScrollViewReader", "GeometryReader",
+        "NavigationStack", "NavigationView", "NavigationSplitView",
+        "NavigationLink",
+        "TabView",
+
+        // Leaf views
+        "Text", "Label", "Image", "Color", "Shape",
+        "Rectangle", "RoundedRectangle", "Circle", "Capsule", "Ellipse", "Path",
+        "Spacer", "Divider", "EmptyView", "AnyView",
+
+        // Interactive
+        "Button", "Toggle", "Picker", "Slider", "Stepper", "Menu",
+        "TextField", "SecureField", "TextEditor",
+        "DatePicker", "ColorPicker", "Link",
+
+        // Indicators
+        "ProgressView", "ResolvedProgressView",
+
+        // SwiftUI-internal but useful as anchors
+        "ForEach", "TupleView",
+    ]
+
+    static func render(fromJSON jsonString: String) -> String {
+        guard let data = jsonString.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return "(error: could not parse swiftui-debug JSON)"
+        }
+        guard let root = parsed["viewDebugData"] else {
+            return "(viewDebugData missing — server did not return SwiftUI tree)"
+        }
+
+        var lines: [String] = []
+        walk(root, depth: -1, into: &lines)
+        if lines.isEmpty {
+            return "(no SwiftUI views detected — try the full JSON output without --tree)"
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Walks the JSON tree. Nodes whose readableType matches a view kind get
+    /// printed at the current depth and bump depth for their children; others
+    /// are transparent.
+    private static func walk(_ node: Any, depth: Int, into lines: inout [String]) {
+        if let arr = node as? [Any] {
+            for c in arr { walk(c, depth: depth, into: &lines) }
+            return
+        }
+        guard let dict = node as? [String: Any] else { return }
+
+        let kind = nodeKind(dict)
+        var nextDepth = depth
+        if let kind {
+            lines.append(String(repeating: "  ", count: max(depth + 1, 0)) + kind)
+            nextDepth = depth + 1
+        }
+        for child in (dict["children"] as? [Any] ?? []) {
+            walk(child, depth: nextDepth, into: &lines)
+        }
+    }
+
+    /// Inspects a node's `properties` array, returns the most-specific view
+    /// kind we're willing to surface, or nil if none match.
+    private static func nodeKind(_ node: [String: Any]) -> String? {
+        guard let props = node["properties"] as? [[String: Any]] else { return nil }
+        for p in props {
+            let attr = (p["attribute"] as? [String: Any]) ?? p
+            guard let t = attr["readableType"] as? String, !t.isEmpty else { continue }
+            // Strip generic parameters: 'VStack<TupleView<...>>' -> 'VStack'
+            let base = String(t.prefix(while: { $0 != "<" }))
+            if viewKinds.contains(base) {
+                return prettyName(base)
+            }
+        }
+        return nil
+    }
+
+    /// `ResolvedProgressView` is SwiftUI's runtime form of `ProgressView`;
+    /// re-label so the tree stays familiar to source readers.
+    private static func prettyName(_ kind: String) -> String {
+        switch kind {
+        case "ResolvedProgressView": return "ProgressView"
+        default: return kind
+        }
     }
 }
 

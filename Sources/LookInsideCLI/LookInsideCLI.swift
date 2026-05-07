@@ -1236,12 +1236,41 @@ private enum SwiftUIViewTree {
         "ForEach", "TupleView",
     ]
 
+    /// Returns true if @c node looks like a real SwiftUI view-debug payload
+    /// (an array or dict with `children` somewhere) rather than the
+    /// `{"error": "..."}` placeholder Apple's makeViewDebugData returns when
+    /// it can't serialise the requested hosting view.
+    private static func isUsefulDebugTree(_ node: Any?) -> Bool {
+        if let arr = node as? [Any] { return !arr.isEmpty }
+        if let dict = node as? [String: Any] {
+            if dict["error"] != nil && dict.count == 1 { return false }
+            return !dict.isEmpty
+        }
+        return false
+    }
+
     static func render(fromJSON jsonString: String) -> String {
         guard let data = jsonString.data(using: .utf8),
               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return "(error: could not parse swiftui-debug JSON)"
         }
-        guard let root = parsed["viewDebugData"] else {
+
+        // Pick the most informative source. SwiftUI's makeViewDebugData
+        // sometimes returns just `{"error": "..."}` for the main hosting view
+        // (NavigationSplit roots in particular trigger an Apple-internal
+        // serialisation failure). When that happens, fall back to
+        // accessibilityDebugData which carries the same {attribute, children,
+        // kind, type} shape and survives Apple's encoding bug.
+        var root: Any? = nil
+        let vdd = parsed["viewDebugData"]
+        if isUsefulDebugTree(vdd) {
+            root = vdd
+        } else if let ax = parsed["accessibilityDebugData"], isUsefulDebugTree(ax) {
+            root = ax
+        } else {
+            root = vdd ?? parsed["accessibilityDebugData"]
+        }
+        guard let root else {
             return "(viewDebugData missing — server did not return SwiftUI tree)"
         }
 

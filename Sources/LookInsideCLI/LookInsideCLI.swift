@@ -1209,6 +1209,12 @@ private enum SwiftUIViewTree {
     /// View kinds we surface in the rendered tree. Anything else is treated
     /// as a transparent wrapper. Match is on the *base* of the readable type
     /// string, i.e. the identifier before the first `<`.
+    ///
+    /// In addition to this explicit set, `nodeKindAndAnnotation` surfaces any
+    /// type whose readable name belongs to a module outside `SwiftUI`/`Swift`
+    /// — that catches user-defined views (`AppContentView`, `PosterCard`,
+    /// etc.) without having to list them, giving you the same left-rail
+    /// detail Xcode's View Debugger shows for the hosted root.
     private static let viewKinds: Set<String> = [
         // Layout containers
         "VStack", "HStack", "ZStack", "LazyVStack", "LazyHStack",
@@ -1234,6 +1240,28 @@ private enum SwiftUIViewTree {
 
         // SwiftUI-internal but useful as anchors
         "ForEach", "TupleView",
+
+        // NavigationSplitView / NavigationStack runtime scaffolding.
+        // These are SwiftUI private types but they are the only things
+        // visible *at the NavigationSplit column level* — without them the
+        // tree collapses to a single ZStack and hides column separation.
+        "NavigationSplitCore", "_NavigationSplitReader",
+        "NavigationStackCore", "StatefulNavigationStackChildren",
+        "ExplicitStack", "StackSubstructure",
+        "VariadicViewForest", "_VariadicView",
+        "ColumnView", "SidebarStyleContext", "ContainerStyleContext",
+
+        // Platform bridges — useful to see because they mark where SwiftUI
+        // hands off to an AppKit/UIKit representable or a nested hosting view.
+        "PlatformViewRepresentableAdaptor", "DraggingDestinationView",
+        "AppKitPlatformViewHost",
+
+        // Conditional branches that shape the user-visible tree. We keep
+        // _ConditionalContent because it's the only way to tell that an
+        // `if ... else` is present; _OverlayModifier because .overlay() is
+        // a first-class layout primitive for stacking.
+        "_ConditionalContent", "_OverlayModifier",
+        "ViewLeafView",
     ]
 
     /// Returns true if @c node looks like a real SwiftUI view-debug payload
@@ -1390,20 +1418,137 @@ private enum SwiftUIViewTree {
     ///   - Stack  → `(N items)` if TupleView arity is recoverable
     ///   - ProgressView → `(indeterminate)` when the value carries that flag
     /// Returns nil for nodes that aren't visible view kinds.
+    ///
+    /// Two node shapes are accepted:
+    ///   1. `viewDebugData` form: `{"properties": [{"attribute": {"readableType": "..."}}], "children": [...]}`
+    ///   2. `accessibilityDebugData` form: `{"type": "SwiftUI.VStack<...>", "kind": "view", "children": [...]}`
+    /// The AX form is used as a fallback when `makeViewDebugData` returns an
+    /// error dict (e.g. NavigationSplit column hosts on macOS 26) but the
+    /// same hosting view's AX graph is usable.
     private static func nodeKindAndAnnotation(_ node: [String: Any]) -> (String, String?)? {
-        guard let props = node["properties"] as? [[String: Any]] else { return nil }
-        for p in props {
-            let attr = (p["attribute"] as? [String: Any]) ?? p
-            guard let t = attr["readableType"] as? String, !t.isEmpty else { continue }
-            // Strip generic parameters: 'VStack<TupleView<...>>' -> 'VStack'
-            let base = String(t.prefix(while: { $0 != "<" }))
-            if viewKinds.contains(base) {
-                let kind = prettyName(base)
-                let annotation = annotationFor(kind: kind, attr: attr, fullType: t, node: node)
-                return (kind, annotation)
+        // Shape 1: viewDebugData — rich `properties` with nested attributes
+        // carrying verbatim/size/asset/color etc. This is the preferred path
+        // because it still has annotation-worthy data.
+        if let props = node["properties"] as? [[String: Any]] {
+            for p in props {
+                let attr = (p["attribute"] as? [String: Any]) ?? p
+                guard let t = attr["readableType"] as? String, !t.isEmpty else { continue }
+                let base = String(t.prefix(while: { $0 != "<" }))
+                // viewDebugData drops the module prefix from `readableType`
+                // ("AppContentView" instead of "网易爆米花测试.AppContentView"),
+                // but keeps it on the sibling `type` field. Pull the module
+                // out of there so the user-defined-view rule still fires for
+                // app-defined views like `AppContentView`.
+                let module: String? = {
+                    guard let full = attr["type"] as? String else { return nil }
+                    let (_, m) = axBaseAndModule(full)
+                    return m
+                }()
+                if let surfaced = surfaceName(base: base, module: module) {
+                    let annotation = annotationFor(kind: surfaced, attr: attr,
+                                                    fullType: t, node: node)
+                    return (surfaced, annotation)
+                }
+            }
+        }
+
+        // Shape 2: accessibilityDebugData — bare `type` on the node itself.
+        // No annotation data (no verbatim/size/asset), so we only emit the
+        // kind. Use this branch whenever we're walking the AX fallback tree.
+        if let t = node["type"] as? String, !t.isEmpty {
+            // AX types are fully qualified: "SwiftUI.VStack<...>",
+            // "网易爆米花测试.AppContentView", "SwiftUI.(unknown context at
+            // $1bc34a2c4)._NavigationSplitReader". Strip module + any
+            // "(unknown context at ...)" decoration, then the generic tail.
+            let (base, module) = axBaseAndModule(t)
+            if let surfaced = surfaceName(base: base, module: module) {
+                return (surfaced, nil)
             }
         }
         return nil
+    }
+
+    /// Applies the surface/hide policy:
+    ///   1. Explicit `viewKinds` whitelist always wins.
+    ///   2. User-defined views (carrying an AX-form module prefix that is
+    ///      neither SwiftUI. nor Swift.) are surfaced verbatim — this is
+    ///      how `AppContentView`, `FloatingBubbleView`, `MyRowView`, etc.
+    ///      show up without having to list them.
+    ///   3. Everything else (SwiftUI internals, modifiers, effect views,
+    ///      renderer plumbing) is collapsed. This matches what Xcode's View
+    ///      Debugger left rail shows — a tree of user-meaningful containers
+    ///      and leaves, not every `ModifiedContent` / `*Modifier` /
+    ///      `OpacityRendererEffect` / `PlaceholderContentView` wrapper.
+    ///
+    /// `module` is the dotted module prefix from the AX `type` field (e.g.
+    /// "SwiftUI", "Swift", "网易爆米花测试"). Pass nil when the node came
+    /// from viewDebugData (which doesn't carry the module qualifier — the
+    /// whitelist branch is the only one that fires there).
+    private static func surfaceName(base: String, module: String? = nil) -> String? {
+        if viewKinds.contains(base) {
+            return prettyName(base)
+        }
+        // User-defined view: module prefix outside the SwiftUI/Swift
+        // namespace (and not one of the anonymous "unknown context" shims,
+        // which we've already stripped in axBaseType).
+        //
+        // Excluded modules:
+        //   - SwiftUI / _SwiftUI : framework internals
+        //   - Swift              : Swift stdlib (Optional, Array, ...)
+        //   - Foundation         : NSDate, NSURL bridges
+        //   - __C / __C_Synthesized : Imported C / Core Graphics
+        //                          structs (CGSize, CGPoint, CGRect, ...).
+        //                          These show up as `properties` siblings
+        //                          on every SwiftUI node and are pure
+        //                          layout metadata, not visual elements.
+        if let module, !module.isEmpty,
+           module != "SwiftUI", module != "_SwiftUI",
+           module != "Swift", module != "Foundation",
+           module != "__C", module != "__C_Synthesized",
+           !base.isEmpty, !base.hasPrefix("_") {
+            // Guard against the empty/backtick-first edge cases.
+            if let first = base.first, first.isLetter {
+                return base
+            }
+        }
+        return nil
+    }
+
+    /// Parses a fully-qualified AX type string into (base, module).
+    /// Examples:
+    ///   "SwiftUI.VStack<SwiftUI.TupleView<...>>"        -> ("VStack", "SwiftUI")
+    ///   "SwiftUI.(unknown context at $1bc34a2c4)._NavigationSplitReader"
+    ///                                                   -> ("_NavigationSplitReader", "SwiftUI")
+    ///   "网易爆米花测试.AppContentView"                  -> ("AppContentView", "网易爆米花测试")
+    ///   "Swift.Optional<...>"                           -> ("Optional", "Swift")
+    private static func axBaseAndModule(_ fullType: String) -> (String, String?) {
+        // Drop generic arguments.
+        let noGenerics = String(fullType.prefix(while: { $0 != "<" }))
+        // Drop "(unknown context at $...)" decoration.
+        var s = noGenerics
+        while let r = s.range(of: "(unknown context at $") {
+            if let close = s.range(of: ")", range: r.upperBound..<s.endIndex) {
+                var end = close.upperBound
+                if end < s.endIndex, s[end] == "." {
+                    end = s.index(after: end)
+                }
+                s.removeSubrange(r.lowerBound..<end)
+            } else {
+                break
+            }
+        }
+        // First dotted segment is the module (unless there is no dot, in
+        // which case we have no module info).
+        guard let firstDot = s.firstIndex(of: ".") else { return (s, nil) }
+        let module = String(s[..<firstDot])
+        let rest = String(s[s.index(after: firstDot)...])
+        // The base name is the final dotted segment of the remainder so
+        // nested types like "NavigationSplitCore.NavigationSplitCoordinator.ColumnView"
+        // show as "ColumnView".
+        if let lastDot = rest.lastIndex(of: ".") {
+            return (String(rest[rest.index(after: lastDot)...]), module)
+        }
+        return (rest, module)
     }
 
     /// Builds the per-kind annotation. Each branch is best-effort: if the

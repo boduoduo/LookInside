@@ -15,9 +15,14 @@
 #import <AppKit/AppKit.h>
 #endif
 
+/// Posted when a connected peer channel ends. The notification's
+/// `object` is the `Lookin_PTChannel` instance that just closed, so
+/// observers can scope their cancellation logic to *their* channel and
+/// ignore unrelated clients disconnecting.
 extern NSString *const LKS_ConnectionDidEndNotificationName;
 
 @class LookinConnectionResponseAttachment;
+@class Lookin_PTChannel;
 
 @interface LKS_ConnectionManager : NSObject
 
@@ -25,8 +30,13 @@ extern NSString *const LKS_ConnectionDidEndNotificationName;
 
 @property(nonatomic, assign) BOOL applicationIsActive;
 
-- (void)respond:(LookinConnectionResponseAttachment *)data requestType:(uint32_t)requestType tag:(uint32_t)tag;
-
+/// Push an unsolicited frame to *every* currently-connected peer.
+///
+/// The original API targeted a single peer. With multiple clients we
+/// broadcast: the only call site historically was a UI hint
+/// (`LookinPush_BringForwardScreenshotTask`) which is harmless to send
+/// to every connected client. If a future push needs targeted routing,
+/// add a channel parameter at that point.
 - (void)pushData:(NSObject *)data type:(uint32_t)type;
 
 @end

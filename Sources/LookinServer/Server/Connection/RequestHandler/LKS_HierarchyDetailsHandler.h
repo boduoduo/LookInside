@@ -10,11 +10,18 @@
 #import <Foundation/Foundation.h>
 
 @class LookinDisplayItemDetail, LookinStaticAsyncUpdateTasksPackage;
+@class Lookin_PTChannel;
 
 typedef void (^LKS_HierarchyDetailsHandler_ProgressBlock)(NSArray<LookinDisplayItemDetail *> *details);
 typedef void (^LKS_HierarchyDetailsHandler_FinishBlock)(void);
 
 @interface LKS_HierarchyDetailsHandler : NSObject
+
+/// Bind this handler to a specific connected channel. When that channel
+/// disconnects (and *only* that channel) the handler cancels its work.
+/// This avoids the bug where one client's disconnect would cancel
+/// another client's in-flight pagination stream.
+- (instancetype)initWithChannel:(Lookin_PTChannel *)channel;
 
 /// packages 会按照 idx 从小到大的顺序被执行
 /// 全部任务完成时，finishBlock 会被调用

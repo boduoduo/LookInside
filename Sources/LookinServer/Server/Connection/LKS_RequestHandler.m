@@ -9,6 +9,7 @@
 
 #import "LKS_RequestHandler.h"
 #import "LKS_ConnectionManager.h"
+#import "Lookin_PTChannel.h"
 #import "LookinConnectionResponseAttachment.h"
 #import "LookinHierarchyInfo.h"
 #import "LookinAppInfo.h"
@@ -31,6 +32,7 @@
 
 @interface LKS_RequestHandler ()
 
+@property(nonatomic, weak, readwrite) Lookin_PTChannel *boundChannel;
 @property(nonatomic, strong) NSMutableSet<LKS_HierarchyDetailsHandler *> *activeDetailHandlers;
 @property(nonatomic, strong) NSSet<NSNumber *> *validRequestTypes;
 
@@ -39,7 +41,12 @@
 @implementation LKS_RequestHandler
 
 - (instancetype)init {
+    return [self initWithChannel:nil];
+}
+
+- (instancetype)initWithChannel:(Lookin_PTChannel *)channel {
     if (self = [super init]) {
+        _boundChannel = channel;
         _validRequestTypes = [NSSet setWithArray:@[
             @(LookinRequestTypePing),
             @(LookinRequestTypeApp),
@@ -67,16 +74,38 @@
     return [self.validRequestTypes containsObject:@(requestType)];
 }
 
+/// Sends an attachment to *this handler's* bound channel only. Multiple
+/// clients may be connected concurrently, so we never go through the
+/// connection manager singleton — that would race on which channel
+/// receives the response.
+///
+/// If the channel has been torn down between request and response (the
+/// client disconnected mid-flight), the send is silently dropped.
+- (void)_sendAttachment:(LookinConnectionResponseAttachment *)attachment
+            requestType:(uint32_t)requestType
+                    tag:(uint32_t)tag {
+    Lookin_PTChannel *channel = self.boundChannel;
+    if (!channel) {
+        return;
+    }
+    NSData *archived = [NSKeyedArchiver archivedDataWithRootObject:attachment];
+    dispatch_data_t payload = [archived createReferencingDispatchData];
+    [channel sendFrameOfType:requestType tag:tag withPayload:payload callback:^(NSError *error) {
+        // Errors here mean the peer went away mid-write; nothing useful
+        // to do other than let the channel's own teardown clean up.
+    }];
+}
+
 - (void)_respondWithData:(id)data requestType:(uint32_t)requestType tag:(uint32_t)tag {
     LookinConnectionResponseAttachment *attachment = [LookinConnectionResponseAttachment new];
     attachment.data = data;
-    [[LKS_ConnectionManager sharedInstance] respond:attachment requestType:requestType tag:tag];
+    [self _sendAttachment:attachment requestType:requestType tag:tag];
 }
 
 - (void)_respondWithError:(NSError *)error requestType:(uint32_t)requestType tag:(uint32_t)tag {
     LookinConnectionResponseAttachment *attachment = [LookinConnectionResponseAttachment new];
     attachment.error = error ?: LookinErr_Inner;
-    [[LKS_ConnectionManager sharedInstance] respond:attachment requestType:requestType tag:tag];
+    [self _sendAttachment:attachment requestType:requestType tag:tag];
 }
 
 - (void)handleRequestType:(uint32_t)requestType tag:(uint32_t)tag object:(id)object {
@@ -87,7 +116,7 @@
 #else
         attachment.appIsInBackground = ![LKS_ConnectionManager sharedInstance].applicationIsActive;
 #endif
-        [[LKS_ConnectionManager sharedInstance] respond:attachment requestType:requestType tag:tag];
+        [self _sendAttachment:attachment requestType:requestType tag:tag];
         return;
     }
 
@@ -111,14 +140,21 @@
         for (LookinStaticAsyncUpdateTasksPackage *package in packages) {
             responsesDataTotalCount += package.tasks.count;
         }
-        LKS_HierarchyDetailsHandler *handler = [LKS_HierarchyDetailsHandler new];
+        // Bind the detail handler to *this* connection's channel so that
+        // a different client disconnecting cannot cancel our paginated
+        // stream. See LKS_HierarchyDetailsHandler's notification filter.
+        LKS_HierarchyDetailsHandler *handler =
+            [[LKS_HierarchyDetailsHandler alloc] initWithChannel:self.boundChannel];
         [self.activeDetailHandlers addObject:handler];
+        __weak typeof(self) weakSelf = self;
         [handler startWithPackages:packages block:^(NSArray<LookinDisplayItemDetail *> *details) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) { return; }
             LookinConnectionResponseAttachment *attachment = [LookinConnectionResponseAttachment new];
             attachment.data = details;
             attachment.dataTotalCount = responsesDataTotalCount;
             attachment.currentDataCount = details.count;
-            [[LKS_ConnectionManager sharedInstance] respond:attachment requestType:requestType tag:tag];
+            [strongSelf _sendAttachment:attachment requestType:requestType tag:tag];
         } finishedBlock:^{
             [self.activeDetailHandlers removeObject:handler];
         }];

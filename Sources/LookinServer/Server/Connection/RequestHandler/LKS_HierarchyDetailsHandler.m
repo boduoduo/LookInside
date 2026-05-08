@@ -12,6 +12,7 @@
 #import "LKS_AttrGroupsMaker.h"
 #import "LookinStaticAsyncUpdateTask.h"
 #import "LKS_ConnectionManager.h"
+#import "Lookin_PTChannel.h"
 #import "LookinServerDefines.h"
 #import "LKS_CustomAttrGroupsMaker.h"
 #import "LKS_HierarchyDisplayItemsMaker.h"
@@ -24,6 +25,7 @@
 #endif
 @interface LKS_HierarchyDetailsHandler ()
 
+@property(nonatomic, weak) Lookin_PTChannel *boundChannel;
 @property(nonatomic, strong) NSMutableArray<LookinStaticAsyncUpdateTasksPackage *> *taskPackages;
 /// 标识哪些 oid 已经拉取过 attrGroups 了
 @property(nonatomic, strong) NSMutableSet<NSNumber *> *attrGroupsSyncedOids;
@@ -36,8 +38,20 @@
 @implementation LKS_HierarchyDetailsHandler
 
 - (instancetype)init {
+    return [self initWithChannel:nil];
+}
+
+- (instancetype)initWithChannel:(Lookin_PTChannel *)channel {
     if (self = [super init]) {
-        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(_handleConnectionDidEnd:) name:LKS_ConnectionDidEndNotificationName object:nil];
+        _boundChannel = channel;
+        // Cancel only when *our* channel goes away. The notification's
+        // object is the channel that just ended (set by
+        // LKS_ConnectionManager). nil channel means broadcast (legacy
+        // single-client mode); we still cancel in that case for safety.
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(_handleConnectionDidEnd:)
+                                                     name:LKS_ConnectionDidEndNotificationName
+                                                   object:nil];
 
         self.attrGroupsSyncedOids = [NSMutableSet set];
     }
@@ -250,7 +264,14 @@
     return YES;
 }
 
-- (void)_handleConnectionDidEnd:(id)obj {
+- (void)_handleConnectionDidEnd:(NSNotification *)note {
+    // Only cancel if the channel that ended is the one we were bound to.
+    // When boundChannel is nil (legacy single-client init path) any
+    // disconnect cancels us, preserving the original behaviour.
+    Lookin_PTChannel *closing = [note.object isKindOfClass:[Lookin_PTChannel class]] ? note.object : nil;
+    if (self.boundChannel && closing && self.boundChannel != closing) {
+        return;
+    }
     [self cancel];
 }
 

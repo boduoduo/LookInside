@@ -271,46 +271,38 @@
                 if ([raw isKindOfClass:[NSData class]]) {
                     NSData *rawData = (NSData *)raw;
                     NSUInteger len = rawData.length;
-                    // Large NSData payloads (notably SwiftUIDebugData's 50 MB
-                    // JSON for non-trivial hosting views) trip a macOS 26
+                    // Large NSData payloads (SwiftUIDebugData's 50 MB JSON for
+                    // non-trivial hosting views) trip a macOS 26
                     // NSKeyedUnarchiver bug on the client where the secure-
                     // coding warning generator self-recurses on +[NSObject
                     // description] and overflows the stack guard with SIGBUS
                     // while decoding nested NSDictionary trees.
                     //
-                    // Workaround: spool any payload above the threshold to a
-                    // temp file under NSTemporaryDirectory() and put just the
-                    // path in the response. The client maps it back into the
-                    // viewDebugData field after decoding the (now small)
-                    // attachment. macOS server + macOS client are always on
-                    // the same machine so a shared filesystem path is safe;
-                    // iOS / tvOS / visionOS targets keep the inline payload.
-                    static const NSUInteger spillThreshold = 0; // always spill on macOS
+                    // Workaround: spool the payload unconditionally on macOS
+                    // to a temp file under NSTemporaryDirectory() and put just
+                    // the path in the response. The client maps it back into
+                    // the viewDebugData field after decoding the (now small)
+                    // attachment. iOS / tvOS / visionOS keep the inline
+                    // payload — they don't hit the bug and they aren't
+                    // necessarily on the same filesystem as the client.
 #if TARGET_OS_OSX
-                    if (len >= spillThreshold) {
-                        NSString *fileName = [NSString stringWithFormat:
-                                              @"lks-swiftui-%lu-%@.json",
-                                              oid, [[NSUUID UUID] UUIDString]];
-                        NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:fileName];
-                        NSError *writeErr = nil;
-                        BOOL ok = [rawData writeToFile:path
-                                               options:NSDataWritingAtomic
-                                                 error:&writeErr];
-                        if (ok) {
-                            response[@"viewDebugDataFormat"] = @"file";
-                            response[@"viewDebugDataFilePath"] = path;
-                            response[@"viewDebugDataLength"] = @(len);
-                            // Don't include the bytes themselves — that is the
-                            // entire point of the spill.
-                        } else {
-                            // Fall back to inline if the spool failed; the
-                            // client may still hit the macOS 26 bug, but
-                            // truncating silently would be worse.
-                            response[@"viewDebugData"] = rawData;
-                            response[@"viewDebugDataFormat"] = @"raw";
-                            response[@"viewDebugDataLength"] = @(len);
-                        }
+                    NSString *fileName = [NSString stringWithFormat:
+                                          @"lks-swiftui-%lu-%@.json",
+                                          oid, [[NSUUID UUID] UUIDString]];
+                    NSString *path = [NSTemporaryDirectory() stringByAppendingPathComponent:fileName];
+                    NSError *writeErr = nil;
+                    BOOL ok = [rawData writeToFile:path
+                                           options:NSDataWritingAtomic
+                                             error:&writeErr];
+                    if (ok) {
+                        response[@"viewDebugDataFormat"] = @"file";
+                        response[@"viewDebugDataFilePath"] = path;
+                        response[@"viewDebugDataLength"] = @(len);
                     } else {
+                        // Spool failed (disk full, sandbox trouble, ...).
+                        // Fall back to inline: the client may SIGBUS on the
+                        // macOS 26 bug, but silently truncating would be
+                        // worse — the user needs to see the error surface.
                         response[@"viewDebugData"] = rawData;
                         response[@"viewDebugDataFormat"] = @"raw";
                         response[@"viewDebugDataLength"] = @(len);

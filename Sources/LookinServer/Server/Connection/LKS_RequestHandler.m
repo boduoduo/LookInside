@@ -226,12 +226,23 @@
         //
         // Also caps recursion depth: SwiftUI's accessibilityDebugData routinely
         // nests 500+ levels deep, well beyond NSPropertyListSerialization's
-        // (and NSJSONSerialization's) ~512-level recursion limit. Anything
-        // past depth 60 is summarised as "<truncated>" so the result is
-        // serialisable by either format.
+        // (and NSJSONSerialization's) ~512-level recursion limit. The cap
+        // below is chosen to (a) stay under NSJSONSerialization's internal
+        // stack guard (~512 on macOS 26) and (b) be high enough to admit the
+        // real SwiftUI graphs we see in practice — NavigationSplit-hosted
+        // apps on macOS 26 need ~250 levels to reach the per-column body,
+        // because every modifier (ModifiedContent, _ViewModifier_Content,
+        // _PreferenceWritingModifier, ...) counts as one level *and* each
+        // node's `properties`/`attribute`/`subattributes` chain contributes
+        // a further ~3x on top of the visible tree depth.
+        //
+        // 400 gives ~2x headroom over the observed depth (~220 for our
+        // worst case) while staying comfortably under JSON's 512 limit.
+        // Anything deeper is summarised as "<truncated>" to keep the payload
+        // serialisable.
         __block id (^sanitizeDepth)(id, int) = nil;
         sanitizeDepth = ^id(id obj, int depth) {
-            if (depth > 60) return @"<truncated>";
+            if (depth > 400) return @"<truncated>";
             if (!obj || [obj isKindOfClass:[NSNull class]]) return obj;
             if ([obj isKindOfClass:[NSString class]] ||
                 [obj isKindOfClass:[NSNumber class]]) return obj;

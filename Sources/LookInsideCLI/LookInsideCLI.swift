@@ -768,20 +768,66 @@ private enum SwiftUIDebugSummary {
     }
 
     private static func parseAttributedDescription(_ s: String) -> AttrInfo? {
+        // The attributed-string description for a SwiftUI Text comes in two
+        // flavours: macOS uses NSFont's classic `<NSFont: 0x...> "name" 14.00 pt`
+        // form, and iOS / tvOS / visionOS use UICTFont's
+        // `<UICTFont: 0x...> font-family: ".SFUI-Regular"; ...; font-size: 13.00pt;`
+        // form. Both end with a `{ ... }` block that lists NSColor, NSFont,
+        // NSParagraphStyle. The text itself is everything before the first `{`.
+        //
+        // We pre-screen with `NSFont` (present on both platforms) so that
+        // unrelated leaf strings (e.g. raw view debug descriptions) are
+        // skipped before we run the regex extraction.
         guard let braceIdx = s.firstIndex(of: "{") else { return nil }
         let text = String(s[..<braceIdx])
-        if text.contains("\n") || text.count > 200 { return nil }
+        // Reject obviously-non-text leaves: a real SwiftUI Text never contains
+        // a literal newline before the brace and the longest copy we've seen
+        // in shipping apps tops out at ~600 chars (full marketing body block).
+        // Use 1024 as a comfortable upper bound — well above any real string,
+        // tight enough to refuse JSON blobs that happen to share the suffix.
+        if text.contains("\n") || text.count > 1024 { return nil }
         if !s.contains("NSFont") { return nil }
 
         var info = AttrInfo(text: text)
 
-        if let r = s.range(of: "([.A-Za-z0-9-]+)\\s+(\\d+(?:\\.\\d+)?)\\s*pt", options: .regularExpression) {
+        // --- font name + size ---
+        // iOS / tvOS / visionOS:
+        //   font-family: "NAME"; font-weight: ...; font-size: 14.00pt;
+        // The family name is between double quotes, the size between
+        // `font-size:` and `pt;`. Try this first because the macOS pattern
+        // (a bare `NAME 14.00 pt`) accidentally matches against the
+        // `font-weight: normal; font-size: 13.00pt;` tail otherwise.
+        var fontMatched = false
+        if let famR = s.range(of: "font-family:\\s*\"([^\"]+)\"",
+                               options: .regularExpression) {
+            let famSlice = s[famR]
+            if let q1 = famSlice.firstIndex(of: "\""),
+               let q2 = famSlice.lastIndex(of: "\""), q1 < q2 {
+                let after1 = famSlice.index(after: q1)
+                if after1 < q2 {
+                    info.font = String(famSlice[after1..<q2])
+                }
+            }
+            if let szR = s.range(of: "font-size:\\s*(\\d+(?:\\.\\d+)?)\\s*pt",
+                                  options: .regularExpression) {
+                let szSlice = s[szR]
+                let nums = szSlice.split(whereSeparator: { !"0123456789.".contains($0) })
+                                  .compactMap { Double($0) }
+                if let n = nums.first { info.fontSize = n; fontMatched = true }
+            }
+        }
+        // Fallback: classic NSFont format `name 14.00 pt`
+        if !fontMatched,
+           let r = s.range(of: "([.A-Za-z0-9-]+)\\s+(\\d+(?:\\.\\d+)?)\\s*pt",
+                            options: .regularExpression) {
             let parts = s[r].split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
             if parts.count >= 2 {
                 info.font = String(parts[0])
                 info.fontSize = Double(parts[1])
             }
         }
+
+        // --- alignment, lineSpacing (NSParagraphStyle) — same format on both platforms ---
         if let r = s.range(of: "Alignment\\s+(\\w+)", options: .regularExpression),
            let p = s[r].split(separator: " ").last {
             info.alignment = String(p).trimmingCharacters(in: .punctuationCharacters)
@@ -790,11 +836,34 @@ private enum SwiftUIDebugSummary {
            let p = s[r].split(separator: " ").last {
             info.lineSpacing = Double(p)
         }
-        if let r = s.range(of: "NSColor\\s*=\\s*\"[^\"]+\"", options: .regularExpression) {
+
+        // --- color ---
+        // iOS / tvOS / visionOS: `NSColor = UIExtendedSRGBColorSpace R G B A;`
+        //                       (no quotes, components separated by spaces)
+        // macOS:                `NSColor = "NSCalibratedRGBColorSpace 1 1 1 1";` etc
+        //                       (quoted; numbers are space-separated inside)
+        var colorMatched = false
+        if let r = s.range(of: "NSColor\\s*=\\s*[A-Za-z]+(?:ColorSpace|Color)\\s+([0-9.\\s]+);",
+                            options: .regularExpression) {
             let nums = s[r].split(whereSeparator: { !"0123456789.".contains($0) })
                 .compactMap { Double($0) }
             if nums.count >= 4 {
-                let r = nums[nums.count-4], g = nums[nums.count-3], b = nums[nums.count-2], a = nums[nums.count-1]
+                let r = nums[nums.count-4], g = nums[nums.count-3]
+                let b = nums[nums.count-2], a = nums[nums.count-1]
+                info.color = String(format: "#%02X%02X%02X%02X",
+                                    Int((r * 255).rounded()), Int((g * 255).rounded()),
+                                    Int((b * 255).rounded()), Int((a * 255).rounded()))
+                colorMatched = true
+            }
+        }
+        // Fallback to the quoted macOS form
+        if !colorMatched,
+           let r = s.range(of: "NSColor\\s*=\\s*\"[^\"]+\"", options: .regularExpression) {
+            let nums = s[r].split(whereSeparator: { !"0123456789.".contains($0) })
+                .compactMap { Double($0) }
+            if nums.count >= 4 {
+                let r = nums[nums.count-4], g = nums[nums.count-3]
+                let b = nums[nums.count-2], a = nums[nums.count-1]
                 info.color = String(format: "#%02X%02X%02X%02X",
                                     Int((r * 255).rounded()), Int((g * 255).rounded()),
                                     Int((b * 255).rounded()), Int((a * 255).rounded()))

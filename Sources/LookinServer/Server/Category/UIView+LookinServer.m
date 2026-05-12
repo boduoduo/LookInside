@@ -267,10 +267,15 @@
 }
 
 - (NSInteger)lks_traitCollection_userInterfaceLevel {
+#if TARGET_OS_TV
+    // tvOS UITraitCollection has no userInterfaceLevel.
+    return -1;
+#else
     if (@available(iOS 13.0, *)) {
         return (NSInteger)self.traitCollection.userInterfaceLevel;
     }
     return -1;
+#endif
 }
 
 - (NSInteger)lks_traitCollection_activeAppearance {

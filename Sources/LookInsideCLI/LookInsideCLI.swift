@@ -793,21 +793,25 @@ private enum SwiftUIDebugSummary {
         // --- font name + size ---
         // iOS / tvOS / visionOS:
         //   font-family: "NAME"; font-weight: ...; font-size: 14.00pt;
-        // The family name is between double quotes, the size between
+        // The family name is between double quotes (raw `"` on iOS, `\"` in
+        // the JSON-stringified tvOS payload). The size sits between
         // `font-size:` and `pt;`. Try this first because the macOS pattern
         // (a bare `NAME 14.00 pt`) accidentally matches against the
         // `font-weight: normal; font-size: 13.00pt;` tail otherwise.
         var fontMatched = false
-        if let famR = s.range(of: "font-family:\\s*\"([^\"]+)\"",
+        if let famR = s.range(of: "font-family:\\s*\\\\?\"([^\"]+)\\\\?\"",
                                options: .regularExpression) {
             let famSlice = s[famR]
-            if let q1 = famSlice.firstIndex(of: "\""),
-               let q2 = famSlice.lastIndex(of: "\""), q1 < q2 {
-                let after1 = famSlice.index(after: q1)
-                if after1 < q2 {
-                    info.font = String(famSlice[after1..<q2])
-                }
-            }
+            // Extract between the opening and closing double-quote (handles
+            // both raw `"` and JSON-escaped `\"` which the regex already
+            // normalises via the optional-backslash capture).
+            let cleaned = famSlice
+                .replacingOccurrences(of: "font-family:", with: "")
+                .replacingOccurrences(of: ";", with: "")
+                .trimmingCharacters(in: .whitespaces)
+                .replacingOccurrences(of: "\\\"", with: "")
+                .replacingOccurrences(of: "\"", with: "")
+            if !cleaned.isEmpty { info.font = cleaned; fontMatched = true }
             if let szR = s.range(of: "font-size:\\s*(\\d+(?:\\.\\d+)?)\\s*pt",
                                   options: .regularExpression) {
                 let szSlice = s[szR]

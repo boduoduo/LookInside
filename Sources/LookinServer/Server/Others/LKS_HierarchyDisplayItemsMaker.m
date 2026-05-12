@@ -37,7 +37,7 @@
     NSMutableArray<LookinDisplayItem *> *resultArray = [NSMutableArray array];
     if (@available(iOS 13.0, *)) {
         // iOS 13+: group windows by UIWindowScene, scene is the top-level container
-        for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        for (UIScene *scene in LKS_SharedApplication().connectedScenes) {
             if (![scene isKindOfClass:[UIWindowScene class]]) {
                 continue;
             }

@@ -77,7 +77,7 @@
 
 #if TARGET_OS_VISION || TARGET_OS_MACCATALYST
 + (UIWindowScene *)getFirstActiveWindowScene {
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+    for (UIScene *scene in LKS_SharedApplication().connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) {
             continue;
         }
@@ -94,7 +94,7 @@
 #if TARGET_OS_VISION
     return [self getFirstActiveWindowScene].keyWindow;
 #elif TARGET_OS_IPHONE
-    return [LookinApplication sharedApplication].keyWindow;
+    return LKS_SharedApplication().keyWindow;
 #elif TARGET_OS_OSX
     return [LookinApplication sharedApplication].keyWindow;
 #else
@@ -107,7 +107,7 @@
 #if TARGET_OS_VISION
     NSMutableArray<UIWindow *> *windows = [NSMutableArray new];
     for (UIScene *scene in
-         UIApplication.sharedApplication.connectedScenes) {
+         LKS_SharedApplication().connectedScenes) {
         if (![scene isKindOfClass:UIWindowScene.class]) {
             continue;
         }
@@ -123,6 +123,8 @@
     }
 
     return [windows copy];
+#elif TARGET_OS_IPHONE
+    return [LKS_SharedApplication().windows copy];
 #else
     return [[LookinApplication sharedApplication].windows copy];
 #endif

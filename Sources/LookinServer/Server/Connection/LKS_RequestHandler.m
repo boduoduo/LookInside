@@ -231,7 +231,20 @@
     }
 
     if (requestType == LookinRequestTypeSwiftUIDebugData) {
-#if TARGET_OS_OSX
+        // SwiftUI exposes two undocumented selectors on every NSHostingView /
+        // _UIHostingView subclass that the Xcode View Debugger consumes. They
+        // are stable public-ish ObjC entry points and return structured JSON /
+        // NSArray that already contain font / colour / text attributes for
+        // every Text/Image in the hosted SwiftUI tree.
+        //
+        // Both selectors are exposed via libViewDebuggerSupport.dylib (auto-
+        // injected by Xcode when launching with `Cmd+R`, or by the host when
+        // the env var `SWIFTUI_VIEW_DEBUG=287` is set). The selectors exist on
+        // _UIHostingView (iOS / tvOS / visionOS) and NSHostingView (macOS)
+        // alike; the implementation differs only in whether the resulting
+        // NSData payload is large enough to trip the macOS 26 NSKeyedUnarchiver
+        // bug — see the inner `#if TARGET_OS_OSX` for the spool-to-file
+        // workaround that only macOS 26 hosts need.
         unsigned long oid = [(NSNumber *)object unsignedLongValue];
         NSObject *resolvedObject = [NSObject lks_objectWithOid:oid];
         if (!resolvedObject) {
@@ -242,11 +255,6 @@
         NSMutableDictionary *response = [NSMutableDictionary dictionary];
         response[@"className"] = NSStringFromClass([resolvedObject class]) ?: @"";
 
-        // SwiftUI exposes two undocumented selectors on every NSHostingView
-        // subclass that the Xcode View Debugger consumes. They are stable
-        // public-ish ObjC entry points and return structured JSON / NSArray
-        // that already contain font / colour / text attributes for every
-        // Text/Image in the hosted SwiftUI tree.
         SEL makeViewDebugDataSel = @selector(makeViewDebugData);
         SEL accessibilityDebugSel = @selector(_accessibilitySwiftUIDebugData);
 
@@ -437,10 +445,6 @@
 
         [self _respondWithData:response requestType:requestType tag:tag];
         return;
-#else
-        [self _respondWithError:LookinErr_Inner requestType:requestType tag:tag];
-        return;
-#endif
     }
 
     if (requestType == LookinRequestTypeAllSelectorNames) {

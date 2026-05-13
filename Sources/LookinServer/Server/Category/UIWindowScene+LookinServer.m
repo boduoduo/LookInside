@@ -57,15 +57,29 @@
 }
 
 - (BOOL)lks_statusBarHidden {
+#if TARGET_OS_TV
+    // tvOS has no status bar; UIStatusBarManager is unavailable. Treat the
+    // bar as permanently hidden so the dashboard renders consistently.
+    return YES;
+#else
     return self.statusBarManager ? self.statusBarManager.isStatusBarHidden : YES;
+#endif
 }
 
 - (NSInteger)lks_statusBarStyle {
+#if TARGET_OS_TV
+    return 0;
+#else
     return self.statusBarManager ? (NSInteger)self.statusBarManager.statusBarStyle : 0;
+#endif
 }
 
 - (CGRect)lks_statusBarFrame {
+#if TARGET_OS_TV
+    return CGRectZero;
+#else
     return self.statusBarManager ? self.statusBarManager.statusBarFrame : CGRectZero;
+#endif
 }
 
 - (NSInteger)lks_userInterfaceStyle {
@@ -89,7 +103,14 @@
 }
 
 - (NSInteger)lks_userInterfaceLevel {
+#if TARGET_OS_TV
+    // tvOS UITraitCollection has no userInterfaceLevel — return 0 (the
+    // `UIUserInterfaceLevelUnspecified` value on iOS) so the dashboard
+    // gets a deterministic default instead of an unavailable-API error.
+    return 0;
+#else
     return (NSInteger)self.traitCollection.userInterfaceLevel;
+#endif
 }
 
 - (NSInteger)lks_activeAppearance {

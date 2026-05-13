@@ -8,7 +8,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSArray<LICDiscoveredTarget *> *)listTargets:(NSError **)error;
 - (nullable LICDiscoveredTarget *)inspectTargetWithID:(NSString *)targetID error:(NSError **)error;
 - (nullable NSString *)hierarchyForTargetID:(NSString *)targetID format:(NSString *)format error:(NSError **)error;
+- (nullable NSString *)hierarchyWithAttrsJSONForTargetID:(NSString *)targetID error:(NSError **)error;
 - (nullable NSURL *)exportTargetID:(NSString *)targetID outputPath:(NSString *)outputPath error:(NSError **)error;
+- (nullable NSString *)allAttrGroupsJSONForTargetID:(NSString *)targetID layerOID:(NSUInteger)oid error:(NSError **)error;
+- (nullable NSString *)introspectJSONForTargetID:(NSString *)targetID oid:(NSUInteger)oid error:(NSError **)error;
+- (nullable NSString *)swiftUIDebugJSONForTargetID:(NSString *)targetID oid:(NSUInteger)oid error:(NSError **)error;
 
 @end
 

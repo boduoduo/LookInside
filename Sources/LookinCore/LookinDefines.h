@@ -20,7 +20,12 @@
 #pragma mark - Version
 
 /// current connection protocol version of LookinServer
-static const int LOOKIN_SERVER_VERSION = 8;
+// LookinServer 协议版本号。上游 Lookin GUI 1.0.6 之前发布的客户端
+// (LOOKIN_SUPPORTED_SERVER_MAX == 7) 不识别 8，会拒绝连接并提示 "客户端版本过低"。
+// 我们的 fork 把 server 报的版本号锁在 7 以保证与公开 GUI 兼容；CLI 与新增
+// RPC (Introspect / SwiftUIDebugData) 的能力靠 LKS_RequestHandler 的
+// canHandleRequestType: 白名单决定，跟版本号解耦。
+static const int LOOKIN_SERVER_VERSION = 7;
 
 /// current release version of LookinServer
 static NSString * const LOOKIN_SERVER_READABLE_VERSION = @"1.3.0";
@@ -29,7 +34,7 @@ static NSString * const LOOKIN_SERVER_READABLE_VERSION = @"1.3.0";
 static const int LOOKIN_CLIENT_VERSION = 8;
 
 /// the minimum connection protocol version supported by current LookinClient
-static const int LOOKIN_SUPPORTED_SERVER_MIN = 8;
+static const int LOOKIN_SUPPORTED_SERVER_MIN = 7;
 /// the maximum connection protocol version supported by current LookinClient
 static const int LOOKIN_SUPPORTED_SERVER_MAX = 8;
 
@@ -85,6 +90,15 @@ enum {
     LookinRequestTypeLicenseChallenge = 220,
     /// License 握手：Host → Server 提交签名 + 中间证书供校验
     LookinRequestTypeLicenseVerify = 221,
+
+    /// 通用对象探针（CLI `lookinside ivars` 使用）。请求体 @{ @"oid": @(oid) }，
+    /// 响应 NSDictionary 含 className / superclasses / ivars / accessibility。
+    LookinRequestTypeIntrospect = 230,
+
+    /// SwiftUI 视图调试数据（CLI `lookinside swiftui-debug` 使用）。请求体 @(oid)
+    /// 必须是 NSHostingView 实例。响应 NSDictionary 含 makeViewDebugData JSON +
+    /// _accessibilitySwiftUIDebugData 数组。
+    LookinRequestTypeSwiftUIDebugData = 232,
 
     /// 从 LookinServer 1.2.7 & Lookin 1.0.7 开始，该属性被废弃、不再使用
     LookinPush_BringForwardScreenshotTask = 303,

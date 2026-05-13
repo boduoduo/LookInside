@@ -9,19 +9,32 @@ Use the repository's CLI to inspect live macOS, iOS Simulator, and USB-connected
 
 ## Quick Start
 
-Work from the repository root so SwiftPM can find `Package.swift`.
+The CLI is installed at `/usr/local/bin/lookinside` (built from this repo and symlinked or copied). All commands below use `lookinside` directly — no path prefix needed.
 
-Prefer the built binary for repeat commands:
-
-```bash
-.build/debug/lookinside list
-```
-
-If the binary is missing, build it first:
+If the binary isn't installed yet, build a release binary and link it:
 
 ```bash
-swift build -c debug --product lookinside
+swift build --product lookinside -c release
+ln -sf "$(pwd)/.build/release/lookinside" /usr/local/bin/lookinside
+lookinside --help   # verify
 ```
+
+## OID Convention
+
+The hierarchy tree prints each node as `ClassName#<N>/L<M>`:
+
+- `#N` — **object OID**: the Swift/ObjC object identifier
+- `L<M>` — **layer OID**: the backing CALayer identifier
+
+| Subcommand | Which OID to pass |
+|---|---|
+| `swiftui-debug --oid` | **`#N`** (object OID) — must resolve to the NSHostingView/UIHostingView *object* |
+| `attrs --oid` | **`L<M>`** (layer OID) — resolves to the CALayer |
+| `ivars --oid` | **`L<M>`** (layer OID) |
+
+> ⛔ **Passing a layer OID to `swiftui-debug` silently fails** — `makeViewDebugData` is called on the backing `NSViewBackingLayer`, not the hosting view, and returns `{"className":"NSViewBackingLayer"}` with no `viewDebugData`. Always use the `#N` number for `swiftui-debug`.
+
+Example: from `_TtGC7SwiftUI13NSHostingView...#26/L27` use `--oid 26` for `swiftui-debug`, `--oid 27` for `attrs`.
 
 ## CLI Workflow
 
@@ -32,13 +45,13 @@ Start with `list`. It is also the default subcommand.
 Use text mode for quick terminal inspection:
 
 ```bash
-.build/debug/lookinside list
+lookinside list
 ```
 
 Use JSON when you need a stable shape for docs, parsing, or follow-up automation:
 
 ```bash
-.build/debug/lookinside list --format json
+lookinside list --format json
 ```
 
 Useful filters:
@@ -55,8 +68,8 @@ Useful filters:
 Use `inspect` to print metadata for a target returned by `list`.
 
 ```bash
-.build/debug/lookinside inspect --target <id>
-.build/debug/lookinside inspect --target <id> --format json
+lookinside inspect --target <id>
+lookinside inspect --target <id> --format json
 ```
 
 Prefer JSON when the user asks what fields exist or wants machine-readable output.
@@ -66,19 +79,19 @@ Prefer JSON when the user asks what fields exist or wants machine-readable outpu
 Use tree mode for human-readable terminal output:
 
 ```bash
-.build/debug/lookinside hierarchy --target <id>
+lookinside hierarchy --target <id>
 ```
 
 Use JSON for structured analysis:
 
 ```bash
-.build/debug/lookinside hierarchy --target <id> --format json
+lookinside hierarchy --target <id> --format json
 ```
 
 Use `--output` when the result is too large for the terminal or the user wants an artifact:
 
 ```bash
-.build/debug/lookinside hierarchy --target <id> --output /tmp/sample-tree.txt
+lookinside hierarchy --target <id> --output /tmp/sample-tree.txt
 ```
 
 ### 4. Inspect SwiftUI hosting views (`swiftui-debug`)
@@ -86,35 +99,44 @@ Use `--output` when the result is too large for the terminal or the user wants a
 Use `swiftui-debug` to extract SwiftUI's internal view-debug data (the same payload Xcode's View Debugger consumes) for any `NSHostingView` / `_UIHostingView` instance. **Works on macOS, iOS, tvOS, visionOS** as of 2025-05.
 
 ```bash
-# Find a HostingView OID first
-.build/debug/lookinside hierarchy --target <id> | grep -i hosting
+# Find a HostingView OID first — use the #N (object OID), NOT the L<M> (layer OID)
+lookinside hierarchy --target <id> | grep -i hosting
 
 # Three output modes (mutually exclusive)
-.build/debug/lookinside swiftui-debug --target <id> --oid <hosting-oid>           # raw 50MB JSON
-.build/debug/lookinside swiftui-debug --target <id> --oid <hosting-oid> --tree    # SwiftUI tree
-.build/debug/lookinside swiftui-debug --target <id> --oid <hosting-oid> --summary # flat table
-.build/debug/lookinside swiftui-debug --target <id> --oid <hosting-oid> --items   # JSON array
+lookinside swiftui-debug --target <id> --oid <hosting-oid>           # raw JSON (~50MB)
+lookinside swiftui-debug --target <id> --oid <hosting-oid> --summary # flat table
+lookinside swiftui-debug --target <id> --oid <hosting-oid> --items   # JSON array
 ```
 
 Mode selection:
 
 - `--summary` — humans want a single-screen view of frame / fill / corner / font / colour / text content
 - `--items`   — scripts that need typed columns plus an `extras` dict for un-projected tokens
-- `--tree`    — visualise just the SwiftUI view hierarchy (modifiers / wrappers collapsed)
 - _(no flag)_ — full Apple JSON; use only when chasing fields the parsers above don't surface (NamedColor tokens, NamedImage asset names, modifier chains, full AX tree)
+
+#### macOS CGDrawingLayer fallback (automatic)
+
+On macOS, SwiftUI sometimes renders text via `CGDrawingLayer` instead of emitting `display-list-item` s-expressions. When `--summary` detects no display-list items, it automatically falls back to parsing NSFont-tagged attributed-string descriptions from `viewDebugData`.
+
+In fallback mode:
+- `--summary` shows a narrower table: `TEXT / FONT / SIZE / COLOR` (no `X/Y/W/H/RADIUS/ALPHA` — position unavailable)
+- `--items` JSON includes `"hasFrame": false` on each item — consumers should check this field before using coordinate fields
+- The first line of `--summary` output reads `(macOS CGDrawingLayer path — position unavailable; text/font/color only)`
+
+This affects macOS Sheet views, Sidebar list items, and any hosting view whose children render via CoreGraphics directly.
 
 > ⛔ **Required env: `SWIFTUI_VIEW_DEBUG=287`**. SwiftUI's `makeViewDebugData` only returns useful data when this env var is set on the host app process. Xcode `Cmd+R` injects it automatically; `xcodebuildmcp` / `xcodebuild` / `simctl launch` / `open` (without `--env`) do **not**. Without it, `swiftui-debug` returns empty `viewDebugData` (length 2 = `[]`). See [Launching with SwiftUI debug enabled](#launching-with-swiftui-debug-enabled) below for per-platform launch templates.
 
-> 📝 **iOS / tvOS / visionOS limitation**: those platforms do not emit display-list-item s-expressions inside `viewDebugData`, so `--summary` shows `TEXT / FONT / SIZE / COLOR / Alignment / LineSpacing` but lacks `X / Y / W / H / RADIUS / ALPHA`. Use `lookinside hierarchy --with-attrs` and look up the matching `CGDrawingLayer` / `ImageLayer` frames to fill in position. macOS `--summary` returns the full table.
+> 📝 **iOS / tvOS / visionOS limitation**: those platforms do not emit display-list-item s-expressions inside `viewDebugData`, so `--summary` shows `TEXT / FONT / SIZE / COLOR` but lacks `X / Y / W / H / RADIUS / ALPHA`. Use `lookinside hierarchy --with-attrs` and look up the matching `CGDrawingLayer` / `ImageLayer` frames to fill in position. macOS `--summary` returns the full table when display-list items are present.
 
 ### 5. Inspect arbitrary view / layer attributes (`attrs`)
 
 Use `attrs` to dump every introspectable attribute of a single OID — bg color, corner radius, shadow, opacity, frame, clipping, accessibility — without the SwiftUI debug detour.
 
 ```bash
-.build/debug/lookinside attrs --target <id> --oid <oid>           # raw JSON
-.build/debug/lookinside attrs --target <id> --oid <oid> --summary # text table
-.build/debug/lookinside attrs --target <id> --oid <oid> --items   # JSON array
+lookinside attrs --target <id> --oid <oid>           # raw JSON
+lookinside attrs --target <id> --oid <oid> --summary # text table
+lookinside attrs --target <id> --oid <oid> --items   # JSON array
 ```
 
 Pair with `ivars` (which dumps Objective-C runtime instance variables + AppKit Quick Look info) when chasing why a particular layer / view holds a value the public APIs don't expose.
@@ -124,13 +146,13 @@ Pair with `ivars` (which dumps Objective-C runtime instance variables + AppKit Q
 Use JSON when another tool should consume the hierarchy payload:
 
 ```bash
-.build/debug/lookinside export --target <id> --output /tmp/sample.json --format json
+lookinside export --target <id> --output /tmp/sample.json --format json
 ```
 
 Use archive output when the snapshot should be opened later in LookInside:
 
 ```bash
-.build/debug/lookinside export --target <id> --output /tmp/sample.lookinside
+lookinside export --target <id> --output /tmp/sample.lookinside
 ```
 
 Format rules:
@@ -180,8 +202,8 @@ xcrun devicectl device process launch \
 After launch, run a self-check before relying on `swiftui-debug` output:
 
 ```bash
-TARGET=$(.build/debug/lookinside list --ids-only | head -1)
-HOSTING_OID=$(.build/debug/lookinside hierarchy --target "$TARGET" --format json \
+TARGET=$(lookinside list --ids-only | head -1)
+HOSTING_OID=$(lookinside hierarchy --target "$TARGET" --format json \
     | python3 -c '
 import json,sys
 d=json.load(sys.stdin)
@@ -190,7 +212,7 @@ def f(n):
     for c in n.get("children",[]): f(c)
 for i in d.get("displayItems",[]): f(i)
 ' | head -1)
-LEN=$(.build/debug/lookinside swiftui-debug --target "$TARGET" --oid "$HOSTING_OID" \
+LEN=$(lookinside swiftui-debug --target "$TARGET" --oid "$HOSTING_OID" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin).get("viewDebugDataLength",0))')
 [ "$LEN" -gt 1000 ] && echo "✅ ready ($LEN bytes)" \
                    || echo "❌ FAIL ($LEN bytes) — check SWIFTUI_VIEW_DEBUG=287 was set"
@@ -220,9 +242,7 @@ Full CLI reference (Chinese): [docs/cli.md](../../docs/cli.md) — has the compl
 
 ## Troubleshooting
 
-- If `swift run lookinside ...` says `Could not find Package.swift`, change into the repo root first.
-- If live discovery is flaky, re-run `list` immediately before `inspect`, `hierarchy`, `attrs`, or `swiftui-debug`.
-- Prefer `.build/debug/lookinside` over repeated `swift run` calls once the CLI is built.
+- If live discovery is flaky, re-run `lookinside list` immediately before `inspect`, `hierarchy`, `attrs`, or `swiftui-debug`.
 - Expect hierarchy JSON to be large; write it to a file when you only need a sample or want to inspect it incrementally.
 - **`swiftui-debug` returns `viewDebugDataLength: 2 bytes` (= empty `[]`)**: the host app was launched without `SWIFTUI_VIEW_DEBUG=287`. Restart with the launch template above. This is the single most common failure mode and unrelated to the OID, target connectivity, or LLDB attachment.
 - **`swiftui-debug` returns `LookinErr_Inner -401` on iOS / tvOS / visionOS**: the embedded `LookinServer` predates the cross-platform support (commit `73aebb9` and later). Update the host's `LookinServer` pod / SwiftPM dependency to a build that includes the iOS / tvOS / visionOS code path.

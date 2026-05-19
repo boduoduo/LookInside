@@ -62,6 +62,9 @@
 @property (nonatomic, readonly, nullable) NSString *lks_traitCollection_typesettingLanguage;
 #endif
 
+/// Figma 节点 ID，用于视觉还原精确元素匹配
+@property(nonatomic, copy, nullable) NSString *lks_figmaNodeId;
+
 @end
 
 #endif /* SHOULD_COMPILE_LOOKIN_SERVER */

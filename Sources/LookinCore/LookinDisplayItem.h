@@ -118,6 +118,9 @@ typedef NS_ENUM(NSUInteger, LookinDisplayItemProperty) {
 /// 可能为 nil
 @property(nonatomic, copy) NSString *danceuiSource;
 
+/// Figma 节点 ID，由 lookin_customDebugInfos 的 figmaNodeId 字段传入，用于视觉还原精确比对
+@property(nonatomic, copy) NSString *figmaNodeId;
+
 #pragma mark - No Encode/Decode
 
 @property(nonatomic, weak) id<LookinDisplayItemDelegate> previewItemDelegate;

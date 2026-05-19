@@ -207,6 +207,7 @@
         item.customAttrGroupList = [maker getGroups];
         item.customDisplayTitle = [maker getCustomDisplayTitle];
         item.danceuiSource = [maker getDanceUISource];
+        item.figmaNodeId = [maker getFigmaNodeId];
     }
 
     item.isHidden = layer.isHidden;
@@ -376,6 +377,7 @@
         item.customAttrGroupList = [maker getGroups];
         item.customDisplayTitle = [maker getCustomDisplayTitle];
         item.danceuiSource = [maker getDanceUISource];
+        item.figmaNodeId = [maker getFigmaNodeId];
     }
 
     item.isHidden = view.isHidden;

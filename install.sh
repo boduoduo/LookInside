@@ -58,7 +58,9 @@ main() {
         fi
     fi
 
-    mkdir -p "${INSTALL_DIR}" 2>/dev/null || use_sudo="sudo"
+    if [[ ! -w "${INSTALL_DIR}" ]]; then
+        use_sudo="sudo"
+    fi
     ${use_sudo:-} mkdir -p "${INSTALL_DIR}"
 
     if [[ "$SOURCE" == "local" ]]; then

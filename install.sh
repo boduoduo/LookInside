@@ -105,7 +105,7 @@ main() {
     fi
 
     echo ""
-    "${INSTALL_DIR}/${BINARY}" list 2>/dev/null || echo "lookinside installed to ${INSTALL_DIR}/${BINARY}"
+    "${INSTALL_DIR}/${BINARY}" --version || echo "lookinside installed to ${INSTALL_DIR}/${BINARY}"
     echo "Done."
 }
 

@@ -4,7 +4,6 @@ set -euo pipefail
 PREFIX="${PREFIX:-/usr/local}"
 BINARY="lookinside"
 INSTALL_DIR="${PREFIX}/bin"
-DEFAULT_VERSION="1.3.0"
 SOURCE="local"  # default: install from local build
 
 print_help() {
@@ -15,12 +14,13 @@ Install lookinside CLI binary from local build or GitHub release.
 
 Options:
   --local             Install from local .build/release/ (default)
-  --release VERSION   Install from GitHub release
+  --release [VERSION] Install from GitHub release (latest if VERSION omitted)
   PREFIX              Install prefix (default: /usr/local). Example: PREFIX=~/.local install.sh
 
 Examples:
   install.sh                    # install local build
-  install.sh --release 1.3.0   # install from GitHub release
+  install.sh --release          # install latest GitHub release
+  install.sh --release 1.3.0   # install specific release
   PREFIX=~/.local install.sh    # install without sudo
 
 EOF
@@ -35,7 +35,16 @@ main() {
     # Parse source option
     if [[ "${1:-}" == "--release" ]]; then
         SOURCE="release"
-        version="${2:-${DEFAULT_VERSION}}"
+        version="${2:-}"
+        if [[ -z "$version" ]]; then
+            echo "==> Fetching latest release version..."
+            version=$(curl -fsSL https://api.github.com/repos/boduoduo/LookInside/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+            if [[ -z "$version" ]]; then
+                echo "Error: failed to determine latest release version"
+                exit 1
+            fi
+            echo "==> Latest version: ${version}"
+        fi
     elif [[ "${1:-}" == "--local" ]]; then
         SOURCE="local"
     fi

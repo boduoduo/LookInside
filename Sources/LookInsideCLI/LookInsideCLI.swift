@@ -14,6 +14,7 @@ struct LookInside: ParsableCommand {
         prints target metadata, fetches live view hierarchies, and exports hierarchy
         archives for later analysis.
         """,
+        version: "1.3.1",
         subcommands: [
             List.self,
             Inspect.self,

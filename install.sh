@@ -4,7 +4,12 @@ set -euo pipefail
 PREFIX="${PREFIX:-/usr/local}"
 BINARY="lookinside"
 INSTALL_DIR="${PREFIX}/bin"
-SOURCE="local"  # default: install from local build
+# Default: local when run interactively, release when piped (curl|bash)
+if [[ -t 0 ]] && [[ "${1:-}" != "--release" ]]; then
+    SOURCE="local"
+else
+    SOURCE="release"
+fi
 
 print_help() {
     cat <<EOF
@@ -36,7 +41,13 @@ main() {
     if [[ "${1:-}" == "--release" ]]; then
         SOURCE="release"
         version="${2:-}"
-        if [[ -z "$version" ]]; then
+    elif [[ "${1:-}" == "--local" ]]; then
+        SOURCE="local"
+    fi
+
+    # Resolve version for release mode
+    if [[ "$SOURCE" == "release" ]]; then
+        if [[ -z "${version:-}" ]]; then
             echo "==> Fetching latest release version..."
             version=$(curl -fsSL https://api.github.com/repos/boduoduo/LookInside/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
             if [[ -z "$version" ]]; then
@@ -45,8 +56,6 @@ main() {
             fi
             echo "==> Latest version: ${version}"
         fi
-    elif [[ "${1:-}" == "--local" ]]; then
-        SOURCE="local"
     fi
 
     mkdir -p "${INSTALL_DIR}" 2>/dev/null || use_sudo="sudo"

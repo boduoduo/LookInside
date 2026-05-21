@@ -49,7 +49,7 @@ main() {
     if [[ "$SOURCE" == "release" ]]; then
         if [[ -z "${version:-}" ]]; then
             echo "==> Fetching latest release version..."
-            version=$(curl -fsSL https://api.github.com/repos/boduoduo/LookInside/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+            version=$(curl -fsSL -o /dev/null -w '%{url_effective}' -L https://github.com/boduoduo/LookInside/releases/latest | sed -E 's|.*/tag/||')
             if [[ -z "$version" ]]; then
                 echo "Error: failed to determine latest release version"
                 exit 1

@@ -973,6 +973,9 @@ static id LICSafeNumber(double v) {
     if (item.layerObject.oid && item.layerObject.oid != displayObject.oid) {
         dict[@"layerOid"] = @(item.layerObject.oid);
     }
+    if (item.figmaNodeId.length) {
+        dict[@"figmaNodeId"] = item.figmaNodeId;
+    }
     if (attrsByOid) {
         NSArray *attrGroups = attrsByOid[@(displayObject.oid)];
         if (!attrGroups && item.layerObject.oid) {

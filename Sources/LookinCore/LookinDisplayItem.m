@@ -73,6 +73,7 @@
     newDisplayItem.representedAsKeyWindow = self.representedAsKeyWindow;
     newDisplayItem.customDisplayTitle = self.customDisplayTitle;
     newDisplayItem.danceuiSource = self.danceuiSource;
+    newDisplayItem.figmaNodeId = self.figmaNodeId;
     [newDisplayItem _updateDisplayingInHierarchyProperty];
     return newDisplayItem;
 }
@@ -105,6 +106,7 @@
     }
     [aCoder encodeObject:self.customDisplayTitle forKey:@"customDisplayTitle"];
     [aCoder encodeObject:self.danceuiSource forKey:@"danceuiSource"];
+    [aCoder encodeObject:self.figmaNodeId forKey:@"figmaNodeId"];
 #if TARGET_OS_IPHONE
     [aCoder encodeCGRect:self.frame forKey:@"frame"];
     [aCoder encodeCGRect:self.bounds forKey:@"bounds"];
@@ -162,6 +164,7 @@
         self.shouldCaptureImage = [aDecoder containsValueForKey:@"shouldCaptureImage"] ? [aDecoder decodeBoolForKey:@"shouldCaptureImage"] : YES;
         self.customDisplayTitle = [aDecoder decodeObjectForKey:@"customDisplayTitle"];
         self.danceuiSource = [aDecoder decodeObjectForKey:@"danceuiSource"];
+        self.figmaNodeId = [aDecoder decodeObjectForKey:@"figmaNodeId"];
 #if TARGET_OS_IPHONE
         self.frame = [aDecoder decodeCGRectForKey:@"frame"];
         self.bounds = [aDecoder decodeCGRectForKey:@"bounds"];

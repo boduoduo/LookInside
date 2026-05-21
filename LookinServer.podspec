@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'LookinServer'
-  s.version          = '1.3.0'
+  s.version          = '1.3.1'
   s.summary          = 'In-app inspection runtime for the LookInside (Lookin) UI debugger.'
   s.description      = <<-DESC
                        LookinServer is the in-app runtime that the LookInside / Lookin

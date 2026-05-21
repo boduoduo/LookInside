@@ -447,6 +447,21 @@
 }
 #endif
 
+- (void)setLks_figmaNodeId:(NSString *)lks_figmaNodeId {
+    [self lookin_bindObject:lks_figmaNodeId forKey:@"lks_figmaNodeId"];
+}
+
+- (NSString *)lks_figmaNodeId {
+    return [self lookin_getBindObjectForKey:@"lks_figmaNodeId"];
+}
+
+/// LookinServer 通过 performSelector: 自动调用，返回 figmaNodeId 用于 Phase 2 精确元素匹配
+- (NSDictionary<NSString *, id> *)lookin_customDebugInfos {
+    NSString *nid = self.lks_figmaNodeId;
+    if (!nid.length) return nil;
+    return @{@"figmaNodeId": nid};
+}
+
 @end
 
 #endif /* SHOULD_COMPILE_LOOKIN_SERVER */

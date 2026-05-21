@@ -23,6 +23,7 @@
 @property(nonatomic, strong) NSMutableDictionary<NSString *, NSMutableArray<LookinAttribute *> *> *sectionAndAttrs;
 
 @property(nonatomic, copy) NSString *resolvedCustomDisplayTitle;
+@property(nonatomic, copy) NSString *resolvedFigmaNodeId;
 @property(nonatomic, copy) NSString *resolvedDanceUISource;
 @property(nonatomic, strong) NSMutableArray *resolvedGroups;
 
@@ -158,7 +159,12 @@
     if (danceSource && [danceSource isKindOfClass:[NSString class]] && danceSource.length > 0) {
         self.resolvedDanceUISource = danceSource;
     }
-    
+
+    NSString *figmaNodeId = rawData[@"figmaNodeId"];
+    if (figmaNodeId && [figmaNodeId isKindOfClass:[NSString class]] && figmaNodeId.length > 0) {
+        self.resolvedFigmaNodeId = figmaNodeId;
+    }
+
     [self makeAttrsFromRawProperties:rawProperties];
 }
 
@@ -465,6 +471,10 @@
 
 - (NSString *)getDanceUISource {
     return self.resolvedDanceUISource;
+}
+
+- (NSString *)getFigmaNodeId {
+    return self.resolvedFigmaNodeId;
 }
 
 + (NSArray<LookinAttributesGroup *> *)makeGroupsFromRawProperties:(NSArray *)rawProperties saveCustomSetter:(BOOL)saveCustomSetter {

@@ -99,6 +99,7 @@
                 LookinAttrSec_ViewLayer_Corner,
                 LookinAttrSec_ViewLayer_Shadow,
                 LookinAttrSec_ViewLayer_Tag,
+                LookinAttrSec_ViewLayer_Accessibility,
 #if TARGET_OS_IPHONE
                 LookinAttrSec_ViewLayer_ContentMode,
                 LookinAttrSec_ViewLayer_TintColor,
@@ -471,6 +472,7 @@
 #endif
             
             LookinAttrSec_ViewLayer_Tag: @[LookinAttr_ViewLayer_Tag_Tag],
+            LookinAttrSec_ViewLayer_Accessibility: @[LookinAttr_ViewLayer_Accessibility_Identifier],
 #if TARGET_OS_IPHONE
             
             LookinAttrSec_UIStackView_Axis: @[LookinAttr_UIStackView_Axis_Axis],
@@ -1362,6 +1364,7 @@
             LookinAttrSec_ViewLayer_Border: @"Border",
             LookinAttrSec_ViewLayer_Shadow: @"Shadow",
             LookinAttrSec_ViewLayer_Tag: @"Tag",
+            LookinAttrSec_ViewLayer_Accessibility: @"Accessibility",
             LookinAttrSec_ViewLayer_ContentMode: @"ContentMode",
             LookinAttrSec_ViewLayer_TintColor: @"TintColor",
             LookinAttrSec_UIStackView_Axis: @"Axis",
@@ -1769,6 +1772,29 @@
                 @"briefTitle": @"",
                 @"patch": @(NO)
             },
+#if TARGET_OS_IPHONE
+            LookinAttr_ViewLayer_Accessibility_Identifier: @{
+                @"className": @"UIView",
+                @"fullTitle": @"AccessibilityIdentifier",
+                @"briefTitle": @"Identifier",
+                @"getterString": @"accessibilityIdentifier",
+                @"typeIfObj": @(LookinAttrTypeNSString),
+                @"setterString": @"",
+                @"hideIfNil": @(YES),
+                @"patch": @(NO)
+            },
+#else
+            LookinAttr_ViewLayer_Accessibility_Identifier: @{
+                @"className": @"NSView",
+                @"fullTitle": @"AccessibilityIdentifier",
+                @"briefTitle": @"Identifier",
+                @"getterString": @"accessibilityIdentifier",
+                @"typeIfObj": @(LookinAttrTypeNSString),
+                @"setterString": @"",
+                @"hideIfNil": @(YES),
+                @"patch": @(NO)
+            },
+#endif
             LookinAttr_ViewLayer_Visibility_Hidden: @{
                 @"className": @"CALayer",
                 @"fullTitle": @"Hidden",

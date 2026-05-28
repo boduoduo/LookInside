@@ -96,6 +96,7 @@ LookinAttrSectionIdentifier const LookinAttrSec_ViewLayer_Shadow = @"v_s";
 LookinAttrSectionIdentifier const LookinAttrSec_ViewLayer_ContentMode = @"v_co";
 LookinAttrSectionIdentifier const LookinAttrSec_ViewLayer_TintColor = @"v_t";
 LookinAttrSectionIdentifier const LookinAttrSec_ViewLayer_Tag = @"v_ta";
+LookinAttrSectionIdentifier const LookinAttrSec_ViewLayer_Accessibility = @"v_ax";
 
 LookinAttrSectionIdentifier const LookinAttrSec_UIImageView_Name = @"i_n";
 LookinAttrSectionIdentifier const LookinAttrSec_UIImageView_Open = @"i_o";
@@ -367,6 +368,7 @@ LookinAttrIdentifier const LookinAttr_ViewLayer_ContentMode_Mode = @"vl_c_m";
 LookinAttrIdentifier const LookinAttr_ViewLayer_TintColor_Color = @"vl_t_c";
 LookinAttrIdentifier const LookinAttr_ViewLayer_TintColor_Mode = @"vl_t_m";
 LookinAttrIdentifier const LookinAttr_ViewLayer_Tag_Tag = @"vl_t_t";
+LookinAttrIdentifier const LookinAttr_ViewLayer_Accessibility_Identifier = @"vl_ax_i";
 
 LookinAttrIdentifier const LookinAttr_UIImageView_Name_Name = @"iv_n_n";
 LookinAttrIdentifier const LookinAttr_UIImageView_Open_Open = @"iv_o_o";

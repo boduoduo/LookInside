@@ -80,6 +80,7 @@ extern LookinAttrSectionIdentifier const LookinAttrSec_ViewLayer_BgColor;
 extern LookinAttrSectionIdentifier const LookinAttrSec_ViewLayer_Border;
 extern LookinAttrSectionIdentifier const LookinAttrSec_ViewLayer_Shadow;
 extern LookinAttrSectionIdentifier const LookinAttrSec_ViewLayer_Tag;
+extern LookinAttrSectionIdentifier const LookinAttrSec_ViewLayer_Accessibility;
 
 extern LookinAttrSectionIdentifier const LookinAttrSec_ViewLayer_ContentMode;
 extern LookinAttrSectionIdentifier const LookinAttrSec_ViewLayer_TintColor;
@@ -307,6 +308,7 @@ extern LookinAttrIdentifier const LookinAttr_ViewLayer_ContentMode_Mode;
 extern LookinAttrIdentifier const LookinAttr_ViewLayer_TintColor_Color;
 extern LookinAttrIdentifier const LookinAttr_ViewLayer_TintColor_Mode;
 extern LookinAttrIdentifier const LookinAttr_ViewLayer_Tag_Tag;
+extern LookinAttrIdentifier const LookinAttr_ViewLayer_Accessibility_Identifier;
 
 extern LookinAttrIdentifier const LookinAttr_UIImageView_Name_Name;
 extern LookinAttrIdentifier const LookinAttr_UIImageView_Open_Open;

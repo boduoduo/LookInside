@@ -14,7 +14,7 @@ struct LookInside: ParsableCommand {
         prints target metadata, fetches live view hierarchies, and exports hierarchy
         archives for later analysis.
         """,
-        version: "1.3.1",
+        version: "1.3.3",
         subcommands: [
             List.self,
             Inspect.self,
@@ -23,6 +23,7 @@ struct LookInside: ParsableCommand {
             Attrs.self,
             Ivars.self,
             SwiftUIDebug.self,
+            Vc.self,
         ],
         defaultSubcommand: List.self
     )
@@ -401,6 +402,44 @@ private enum AttrsSummary {
             lines.append(row)
         }
         return lines.joined(separator: "\n")
+    }
+}
+
+private struct Vc: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "vc",
+        abstract: "Show the view controller for the current screen or a specific view.",
+        discussion: """
+        Without --oid, shows the topmost visible (non-container) view controller.
+        With --oid, finds the view controller that hosts the view with that OID
+        by walking up the responder chain.
+        """
+    )
+
+    @OptionGroup var options: SharedTargetOptions
+
+    @Option(help: "View or layer OID. Omit to show the current visible VC.")
+    var oid: UInt = 0
+
+    @Option(help: "Output format.")
+    var format: OutputFormat = .text
+
+    mutating func run() throws {
+        let json = try CLIClient().vcJSON(target: options.target, oid: oid)
+        if format == .json {
+            StandardPrinter.printLine(json)
+        } else {
+            guard let data = json.data(using: .utf8),
+                  let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                StandardPrinter.printLine(json)
+                return
+            }
+            let className = dict["className"] as? String ?? "Unknown"
+            StandardPrinter.printLine(className)
+            if let parents = dict["parentControllers"] as? [String], !parents.isEmpty {
+                StandardPrinter.printLine("  in: " + parents.joined(separator: " → "))
+            }
+        }
     }
 }
 
@@ -1817,6 +1856,14 @@ private struct CLIClient {
     func swiftUIDebugJSON(target: String, oid: UInt) throws -> String {
         do {
             return try client.swiftUIDebugJSON(forTargetID: target, oid: oid)
+        } catch {
+            throw error
+        }
+    }
+
+    func vcJSON(target: String, oid: UInt) throws -> String {
+        do {
+            return try client.vcJSON(forTargetID: target, oid: oid)
         } catch {
             throw error
         }

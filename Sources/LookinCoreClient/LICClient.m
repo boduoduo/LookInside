@@ -976,6 +976,13 @@ static id LICSafeNumber(double v) {
     if (item.figmaNodeId.length) {
         dict[@"figmaNodeId"] = item.figmaNodeId;
     }
+    if (item.hostViewControllerObject) {
+        dict[@"hostViewController"] = @{
+            @"className": [item.hostViewControllerObject rawClassName] ?: @"",
+            @"oid": @(item.hostViewControllerObject.oid),
+            @"memoryAddress": item.hostViewControllerObject.memoryAddress ?: @"",
+        };
+    }
     if (attrsByOid) {
         NSArray *attrGroups = attrsByOid[@(displayObject.oid)];
         if (!attrGroups && item.layerObject.oid) {
@@ -1244,6 +1251,152 @@ static id LICSafeNumber(double v) {
         return nil;
     }
     return [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+}
+
+#pragma mark - View Controller Query
+
+- (nullable NSString *)vcJSONForTargetID:(NSString *)targetID oid:(NSUInteger)oid error:(NSError **)error {
+    LookinHierarchyInfo *hierarchyInfo = [self fetchHierarchyForTargetID:targetID error:error];
+    if (!hierarchyInfo) {
+        return nil;
+    }
+
+    // Build a flat list with parent pointers.
+    NSMutableArray<LookinDisplayItem *> *flatItems = [NSMutableArray array];
+    NSMapTable<LookinDisplayItem *, LookinDisplayItem *> *parentMap = [NSMapTable strongToStrongObjectsMapTable];
+    for (LookinDisplayItem *root in hierarchyInfo.displayItems ?: @[]) {
+        [self flattenItem:root into:flatItems parentMap:parentMap parent:nil];
+    }
+
+    LookinDisplayItem *targetItem = nil;
+
+    if (oid == 0) {
+        // Find the key window subtree to avoid picking up system VCs
+        // (keyboard, status bar) from other windows.
+        NSMutableSet<LookinDisplayItem *> *keyWindowItems = [NSMutableSet set];
+        for (LookinDisplayItem *item in flatItems) {
+            if (item.representedAsKeyWindow) {
+                NSString *cn = [[item displayingObject] rawClassName];
+                // The scene node itself has representedAsKeyWindow; pick the actual UIWindow child.
+                if ([cn containsString:@"Window"] && ![cn containsString:@"Scene"]) {
+                    // Flatten this subtree only.
+                    NSMutableArray<LookinDisplayItem *> *windowFlat = [NSMutableArray array];
+                    [self flattenItem:item into:windowFlat parentMap:parentMap parent:[parentMap objectForKey:item]];
+                    [keyWindowItems addObjectsFromArray:windowFlat];
+                    break;
+                }
+            }
+        }
+        // If we couldn't isolate the key window, use all items.
+        NSArray<LookinDisplayItem *> *searchItems = keyWindowItems.count > 0 ? keyWindowItems.allObjects : flatItems;
+
+        // Find the visible VC: deepest non-container VC in the key window.
+        static NSSet *containerClasses = nil;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            containerClasses = [NSSet setWithArray:@[
+                @"UINavigationController",
+                @"UITabBarController",
+                @"UISplitViewController",
+                @"UIPageViewController",
+                @"UIInputWindowController",
+                @"UIEditingOverlayViewController",
+                @"UISystemInputAssistantViewController",
+                @"UICompatibilityInputViewController",
+            ]];
+        });
+        // Walk flatItems in reverse (deepest first) but only consider key window items.
+        for (LookinDisplayItem *item in [flatItems reverseObjectEnumerator]) {
+            if (![keyWindowItems containsObject:item] && keyWindowItems.count > 0) {
+                continue;
+            }
+            if (item.hostViewControllerObject) {
+                NSString *vcClass = [item.hostViewControllerObject rawClassName];
+                if (vcClass && ![containerClasses containsObject:vcClass]) {
+                    targetItem = item;
+                    break;
+                }
+            }
+        }
+        // Fallback: any item with a VC in the key window
+        if (!targetItem) {
+            for (LookinDisplayItem *item in [flatItems reverseObjectEnumerator]) {
+                if (![keyWindowItems containsObject:item] && keyWindowItems.count > 0) {
+                    continue;
+                }
+                if (item.hostViewControllerObject) {
+                    targetItem = item;
+                    break;
+                }
+            }
+        }
+    } else {
+        // Find the item matching the given OID (view or layer).
+        for (LookinDisplayItem *item in flatItems) {
+            LookinObject *displayObj = item.displayingObject;
+            if (displayObj.oid == oid || item.layerObject.oid == oid || item.viewObject.oid == oid) {
+                targetItem = item;
+                break;
+            }
+        }
+        // Walk up to find the nearest VC.
+        if (targetItem && !targetItem.hostViewControllerObject) {
+            LookinDisplayItem *walker = [parentMap objectForKey:targetItem];
+            while (walker) {
+                if (walker.hostViewControllerObject) {
+                    targetItem = walker;
+                    break;
+                }
+                walker = [parentMap objectForKey:walker];
+            }
+        }
+    }
+
+    if (!targetItem || !targetItem.hostViewControllerObject) {
+        if (error) {
+            *error = [NSError errorWithDomain:LICErrorDomain code:LICErrorCodeInvalidResponse userInfo:@{NSLocalizedDescriptionKey: @"No view controller found."}];
+        }
+        return nil;
+    }
+
+    LookinObject *vcObj = targetItem.hostViewControllerObject;
+    NSMutableDictionary *result = [@{
+        @"className": [vcObj rawClassName] ?: @"",
+        @"oid": @(vcObj.oid),
+        @"memoryAddress": vcObj.memoryAddress ?: @"",
+    } mutableCopy];
+
+    // Collect parent VCs by walking up.
+    NSMutableArray<NSString *> *parentVCs = [NSMutableArray array];
+    LookinDisplayItem *walker = [parentMap objectForKey:targetItem];
+    while (walker) {
+        if (walker.hostViewControllerObject) {
+            NSString *parentVC = [walker.hostViewControllerObject rawClassName];
+            if (parentVC.length) {
+                [parentVCs addObject:parentVC];
+            }
+        }
+        walker = [parentMap objectForKey:walker];
+    }
+    if (parentVCs.count) {
+        result[@"parentControllers"] = parentVCs;
+    }
+
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted | NSJSONWritingSortedKeys error:error];
+    if (!jsonData) {
+        return nil;
+    }
+    return [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+}
+
+- (void)flattenItem:(LookinDisplayItem *)item into:(NSMutableArray *)flat parentMap:(NSMapTable *)parentMap parent:(nullable LookinDisplayItem *)parent {
+    [flat addObject:item];
+    if (parent) {
+        [parentMap setObject:parent forKey:item];
+    }
+    for (LookinDisplayItem *child in item.subitems ?: @[]) {
+        [self flattenItem:child into:flat parentMap:parentMap parent:item];
+    }
 }
 
 - (NSArray *)attrGroupsJSONArrayFromGroups:(NSArray<LookinAttributesGroup *> *)groups {

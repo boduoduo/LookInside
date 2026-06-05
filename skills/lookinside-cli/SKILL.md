@@ -1,6 +1,6 @@
 ---
 name: lookinside-cli
-description: Use this skill when working with the LookInside command-line tool or embedding the LookinServer runtime into a host app. Trigger on requests involving `lookinside list`, `inspect`, `hierarchy`, `attrs`, `ivars`, `swiftui-debug`, `export`, target IDs, hierarchy trees, hierarchy JSON payloads, SwiftUI view debug data, packaging `LookinServerDynamic`, or porting a Lookin-style integration from iOS/macOS to another platform such as Android or HarmonyOS.
+description: Use this skill when working with the LookInside command-line tool or embedding the LookinServer runtime into a host app. Trigger on requests involving `lookinside list`, `inspect`, `hierarchy`, `attrs`, `ivars`, `swiftui-debug`, `vc`, `export`, target IDs, hierarchy trees, hierarchy JSON payloads, SwiftUI view debug data, view controller queries, packaging `LookinServerDynamic`, or porting a Lookin-style integration from iOS/macOS to another platform such as Android or HarmonyOS.
 ---
 
 # LookInside CLI and Integration
@@ -31,6 +31,7 @@ The hierarchy tree prints each node as `ClassName#<N>/L<M>`:
 | `swiftui-debug --oid` | **`#N`** (object OID) — must resolve to the NSHostingView/UIHostingView *object* |
 | `attrs --oid` | **`L<M>`** (layer OID) — resolves to the CALayer |
 | `ivars --oid` | **`L<M>`** (layer OID) |
+| `vc --oid` | **either** `#N` or `L<M>` — walks up to find the hosting VC |
 
 > ⛔ **Passing a layer OID to `swiftui-debug` silently fails** — `makeViewDebugData` is called on the backing `NSViewBackingLayer`, not the hosting view, and returns `{"className":"NSViewBackingLayer"}` with no `viewDebugData`. Always use the `#N` number for `swiftui-debug`.
 
@@ -141,7 +142,42 @@ lookinside attrs --target <id> --oid <oid> --items   # JSON array
 
 Pair with `ivars` (which dumps Objective-C runtime instance variables + AppKit Quick Look info) when chasing why a particular layer / view holds a value the public APIs don't expose.
 
-### 6. Export a reusable snapshot
+### 6. Identify the current view controller (`vc`)
+
+Use `vc` to identify which UIViewController (or NSViewController) owns the currently visible screen, or to find the VC hosting a specific view.
+
+```bash
+# Show the topmost visible (non-container) view controller
+lookinside vc --target <id>
+
+# Find the VC that hosts a specific view by OID
+lookinside vc --target <id> --oid <oid>
+
+# JSON output with parent controller chain
+lookinside vc --target <id> --format json
+```
+
+Text output:
+```
+Filmly.SettingsViewController
+  in: UINavigationController → UITabBarController
+```
+
+JSON output:
+```json
+{
+  "className": "Filmly.SettingsViewController",
+  "oid": 42,
+  "memoryAddress": "0x10f43ec00",
+  "parentControllers": ["UINavigationController", "UITabBarController"]
+}
+```
+
+Without `--oid`, the command automatically finds the deepest non-container VC in the key window (skips UINavigationController, UITabBarController, system input controllers, etc.). With `--oid`, it walks up the view hierarchy from the specified view until it finds a node with a hosting view controller.
+
+The `hierarchy --format json` output also includes a `hostViewController` field on each node that has one, enabling programmatic VC lookups without `vc`.
+
+### 7. Export a reusable snapshot
 
 Use JSON when another tool should consume the hierarchy payload:
 
@@ -162,9 +198,9 @@ Format rules:
 - archive exports must use `.archive`, `.lookin`, or `.lookinside`
 - archive output with no extension becomes `.lookinside`
 
-### 7. Validate against a running host app
+### 8. Validate against a running host app
 
-After launching a host app that embeds `LookinServer`, use `list`, `inspect`, `hierarchy`, `attrs`, or `swiftui-debug` from the CLI to validate the end-to-end flow.
+After launching a host app that embeds `LookinServer`, use `list`, `inspect`, `hierarchy`, `attrs`, `vc`, or `swiftui-debug` from the CLI to validate the end-to-end flow.
 
 ## Launching with SwiftUI debug enabled
 
@@ -242,7 +278,7 @@ Full CLI reference (Chinese): [docs/cli.md](../../docs/cli.md) — has the compl
 
 ## Troubleshooting
 
-- If live discovery is flaky, re-run `lookinside list` immediately before `inspect`, `hierarchy`, `attrs`, or `swiftui-debug`.
+- If live discovery is flaky, re-run `lookinside list` immediately before `inspect`, `hierarchy`, `attrs`, `vc`, or `swiftui-debug`.
 - Expect hierarchy JSON to be large; write it to a file when you only need a sample or want to inspect it incrementally.
 - **`swiftui-debug` returns `viewDebugDataLength: 2 bytes` (= empty `[]`)**: the host app was launched without `SWIFTUI_VIEW_DEBUG=287`. Restart with the launch template above. This is the single most common failure mode and unrelated to the OID, target connectivity, or LLDB attachment.
 - **`swiftui-debug` returns `LookinErr_Inner -401` on iOS / tvOS / visionOS**: the embedded `LookinServer` predates the cross-platform support (commit `73aebb9` and later). Update the host's `LookinServer` pod / SwiftPM dependency to a build that includes the iOS / tvOS / visionOS code path.

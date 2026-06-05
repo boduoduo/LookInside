@@ -13,6 +13,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSString *)allAttrGroupsJSONForTargetID:(NSString *)targetID layerOID:(NSUInteger)oid error:(NSError **)error;
 - (nullable NSString *)introspectJSONForTargetID:(NSString *)targetID oid:(NSUInteger)oid error:(NSError **)error;
 - (nullable NSString *)swiftUIDebugJSONForTargetID:(NSString *)targetID oid:(NSUInteger)oid error:(NSError **)error;
+- (nullable NSString *)vcJSONForTargetID:(NSString *)targetID oid:(NSUInteger)oid error:(NSError **)error;
 
 @end
 
